@@ -13,7 +13,6 @@ namespace RemapTools {
 
 struct MapRange { uintptr_t start; uintptr_t end; };
 
-// قراءة /proc/self/maps للعثور على نطاق المكتبة
 inline bool findLibraryRange(const char* libName, MapRange& out) {
     FILE* fp = fopen("/proc/self/maps", "r");
     if (!fp) return false;
@@ -33,7 +32,6 @@ inline bool findLibraryRange(const char* libName, MapRange& out) {
     return found && out.end > out.start;
 }
 
-// إخفاء المكتبة عن /proc/self/maps عبر إعادة تعيين الذاكرة
 inline bool remapLibrary(const char* libName) {
     MapRange range;
     if (!findLibraryRange(libName, range)) {
@@ -43,7 +41,6 @@ inline bool remapLibrary(const char* libName) {
     size_t size = range.end - range.start;
     REMAP_LOG("[*] %s: range 0x%lx-0x%lx (size=%zu)", libName, range.start, range.end, size);
 
-    // 1. حجز ذاكرة مجهولة جديدة
     void* newMem = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (newMem == MAP_FAILED) {
@@ -51,13 +48,10 @@ inline bool remapLibrary(const char* libName) {
         return false;
     }
 
-    // 2. نسخ محتوى المكتبة
     memcpy(newMem, (void*)range.start, size);
 
-    // 3. محاولة mremap مع MREMAP_FIXED
     void* result = mremap(newMem, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, (void*)range.start);
     if (result == MAP_FAILED) {
-        // 3b. البديل: munmap + mmap على نفس العنوان + memcpy
         REMAP_LOG("[!] mremap failed, trying munmap+mmap fallback for %s", libName);
         munmap((void*)range.start, size);
         void* fixed = mmap((void*)range.start, size, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -71,7 +65,6 @@ inline bool remapLibrary(const char* libName) {
         munmap(newMem, size);
     }
 
-    // 4. ضبط الصلاحيات النهائية
     mprotect((void*)range.start, size, PROT_READ | PROT_EXEC);
     REMAP_LOG("[+] %s hidden successfully", libName);
     return true;
