@@ -20,7 +20,7 @@ jobs:
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
-          "$SDKMANAGER" "ndk;26.1.10909125" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
+          "$SDKMANAGER" "ndk;25.2.9519653" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Set up Gradle 8.4
         uses: gradle/actions/setup-gradle@v3
@@ -29,7 +29,7 @@ jobs:
 
       - name: Build Dobby library
         run: |
-          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/25.2.9519653"
           CMAKE="$ANDROID_HOME/cmake/3.22.1/bin/cmake"
           ls "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
           git clone --depth 1 https://github.com/jmpews/Dobby.git /tmp/Dobby
@@ -48,7 +48,7 @@ jobs:
 
       - name: Build debug APK
         run: |
-          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/25.2.9519653"
           gradle assembleDebug --stacktrace
 
       - name: Upload APK
