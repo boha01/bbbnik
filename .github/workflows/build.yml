@@ -44,20 +44,18 @@ jobs:
           "$LLVM/llvm-ar" rcs app/src/main/cpp/dobby/armeabi-v7a/libdobby.a /tmp/dobby32.o
           ls -lh app/src/main/cpp/dobby/*/libdobby.a
 
-      # Retry loop: the 2026-11-21 failure was Gradle failing to DOWNLOAD the
-      # Android Gradle Plugin's own dependencies (kotlin-stdlib, gson, asm...)
-      # from Maven Central — a network/repository glitch before any code is
-      # compiled. Retrying with --refresh-dependencies rides out that glitch.
-      - name: Build debug APK (with retries)
+      - name: Build debug APK (with retries and GRADLE_OPTS)
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.internal.repository.max.tentatives=6 -Dorg.gradle.internal.repository.initial.backoff=5000"
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
           ok=0
           for i in 1 2 3; do
             echo "=== Build attempt $i ==="
             if gradle assembleDebug --stacktrace --refresh-dependencies; then ok=1; break; fi
-            echo "Attempt $i failed — waiting 30s and retrying"
+            echo "Attempt $i failed — waiting 60s and retrying"
             gradle --stop || true
-            sleep 30
+            sleep 60
           done
           if [ "$ok" != "1" ]; then echo "All build attempts failed"; exit 1; fi
 
