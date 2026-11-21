@@ -1,37 +1,5 @@
 // ============================================================
-// native-lib.cpp - BOHA XVIP / ModMenuPro  (CRASH FIX v2)
-// ------------------------------------------------------------
-// Bug fixed: SIGSEGV, fault address 0x135, inside libmodmenu.so
-// while calling into libil2cpp.so at game startup.
-//
-// Root cause in the old file (NOT just "called too early"):
-//   1. il2cpp.domain_get() result was passed straight into
-//      il2cpp_thread_attach() with NO null check. Before Unity
-//      finishes runtime init, domain_get() returns nullptr and
-//      thread_attach(nullptr) dereferences it inside libil2cpp.
-//   2. Il2CppApi::findClass() called domain_get_assemblies()
-//      and class_from_name() with no null checks on the domain,
-//      the assemblies array, the image, or the count - a null
-//      base + a struct offset is exactly a 0x135-style fault.
-//   3. "Library mapped" was treated as "runtime ready". There
-//      was no settle wait and no retry: classes/metadata are
-//      registered AFTER libil2cpp.so appears in memory.
-//
-// Fix in this file:
-//   * JNI_OnLoad does NOTHING except spawn a detached thread.
-//   * The thread waits for libil2cpp.so in /proc/self/maps AND
-//     via dlopen(RTLD_NOLOAD), then sleeps 3 more seconds.
-//   * domain_get() is POLLED until it returns non-null.
-//   * Every Il2Cpp pointer is null-checked before every call.
-//     Class lookup is a local safe implementation with retries,
-//     it does NOT use the unchecked Il2CppApi::findClass().
-//   * A method pointer is validated (non-null AND inside the
-//     libil2cpp.so mapping) before it is handed to DobbyHook,
-//     and DobbyHook's return code is checked.
-//   * Whole init is wrapped in try/catch, and every failure
-//     path only logs (LOGE) and exits the thread - it never
-//     dereferences a bad pointer. NOTE: try/catch cannot catch
-//     a SIGSEGV; the null/range checks are what prevent it.
+// native-lib.cpp - BOHA XVIP / ModMenuPro (Stealth Edition)
 // ============================================================
 #include <jni.h>
 #include <thread>
@@ -53,9 +21,9 @@
 #define TARGET_CLASS "dev.Scripts.ECS.Morpeh.Features.UnityViewFeature.Components.Position"
 
 // ============================================================
-// HOOKS (unchanged behaviour - only called after safe init)
+// HOOKS
 // ============================================================
-struct PositionComponent { float x, y, z; }; // match field order with dump.cs
+struct PositionComponent { float x, y, z; };
 using PositionUpdate_t = void (*)(void* self, const MethodInfo* method);
 static PositionUpdate_t orig_PositionUpdate = nullptr;
 
@@ -63,13 +31,9 @@ static void hook_PositionUpdate(void* self, const MethodInfo* method) {
     if (self) {
         auto* pos = reinterpret_cast<PositionComponent*>(self);
         F.playerPos = {pos->x, pos->y, pos->z};
-
         if (F.teleportRequested && F.hasWaypoint) {
             pos->x = F.waypoint.x; pos->y = F.waypoint.y; pos->z = F.waypoint.z;
             F.teleportRequested = false;
-        }
-        if (F.freeFly) {
-            // TODO: move pos from overlay input (unchanged from v1)
         }
     }
     if (orig_PositionUpdate) orig_PositionUpdate(self, method);
@@ -78,11 +42,10 @@ static void hook_PositionUpdate(void* self, const MethodInfo* method) {
 using TakeDamage_t = void (*)(void* self, float amount, const MethodInfo* method);
 static TakeDamage_t orig_TakeDamage = nullptr;
 static void hook_TakeDamage(void* self, float amount, const MethodInfo* method) {
-    if (F.godMode) return; // no damage at all
+    if (F.godMode) return;
     if (orig_TakeDamage) orig_TakeDamage(self, amount, method);
 }
 
-// Memory-patch offsets from dump.cs. 0 = not set yet, skipped safely.
 namespace Offsets {
     constexpr uintptr_t InfiniteAmmo = 0x0;
     constexpr uintptr_t RapidFire    = 0x0;
@@ -96,8 +59,6 @@ namespace Offsets {
 // ============================================================
 static std::atomic<bool> g_initStarted{false};
 
-// Range of libil2cpp.so in this process, from /proc/self/maps.
-// Used to reject garbage method pointers before DobbyHook.
 static bool getLibRange(const char* lib, uintptr_t& outBase, uintptr_t& outEnd) {
     FILE* f = fopen("/proc/self/maps", "r");
     if (!f) return false;
@@ -117,29 +78,23 @@ static bool getLibRange(const char* lib, uintptr_t& outBase, uintptr_t& outEnd) 
     return found && outEnd > outBase;
 }
 
-// Wait until libil2cpp.so is BOTH mapped (maps) AND openable
-// (dlopen RTLD_NOLOAD). Returns the handle, or nullptr on timeout.
-// Never calls any il2cpp_* function.
 static void* waitForIl2Cpp(int timeoutSeconds = 90) {
-    const int attempts = timeoutSeconds * 2; // every 500 ms
+    const int attempts = timeoutSeconds * 2;
     for (int i = 0; i < attempts; i++) {
         uintptr_t base = KittyMemory::getBaseAddress("libil2cpp.so");
         if (base != 0) {
             void* handle = dlopen("libil2cpp.so", RTLD_NOLOAD | RTLD_NOW);
             if (handle) {
                 LOGI("[init] libil2cpp.so found (base=0x%" PRIxPTR ", attempt %d)", base, i + 1);
-                return handle; // do NOT dlclose - dlsym results must stay valid
+                return handle;
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
-    LOGE("[init] libil2cpp.so not loaded after %ds - aborting init, game continues without hooks", timeoutSeconds);
+    LOGE("[init] libil2cpp.so not loaded after %ds", timeoutSeconds);
     return nullptr;
 }
 
-// Poll domain_get() until the Il2Cpp runtime is actually up.
-// Calling ANY other il2cpp_* function before this returns
-// non-null is what produced the startup SIGSEGV.
 static Il2CppDomain* waitForDomain(int timeoutSeconds = 30) {
     if (!il2cpp.domain_get) { LOGE("[init] il2cpp_domain_get symbol is null"); return nullptr; }
     const int attempts = timeoutSeconds * 2;
@@ -151,12 +106,10 @@ static Il2CppDomain* waitForDomain(int timeoutSeconds = 30) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
-    LOGE("[init] il2cpp_domain_get() stayed null for %ds - aborting, no hooks installed", timeoutSeconds);
+    LOGE("[init] il2cpp_domain_get() stayed null for %ds", timeoutSeconds);
     return nullptr;
 }
 
-// Safe replacement for Il2CppApi::findClass(): same search
-// (split full name at the last '.'), but EVERY step is checked.
 static Il2CppClass* safeFindClass(Il2CppDomain* domain, const char* fullName) {
     if (!domain || !fullName) return nullptr;
     if (!il2cpp.domain_get_assemblies || !il2cpp.assembly_get_image || !il2cpp.class_from_name) {
@@ -190,7 +143,6 @@ static Il2CppClass* safeFindClass(Il2CppDomain* domain, const char* fullName) {
     return nullptr;
 }
 
-// Validate + install one hook. Returns true only on Dobby success.
 static bool safeHook(Il2CppClass* klass, const char* methodName, int args,
                      void* replaceFn, void** outOrig,
                      uintptr_t libBase, uintptr_t libEnd, const char* label) {
@@ -203,15 +155,15 @@ static bool safeHook(Il2CppClass* klass, const char* methodName, int args,
     const Il2CppMethod* m = il2cpp.class_get_method(klass, methodName, args);
     if (!m) { LOGI("[hook] %s: method '%s' not found", label, methodName); return false; }
 
-    void* ptr = Il2CppApi::methodPointer(m); // checks m != nullptr internally
+    void* ptr = Il2CppApi::methodPointer(m);
     if (!ptr) { LOGE("[hook] %s: '%s' has a null method pointer, skipped", label, methodName); return false; }
     if ((uintptr_t)ptr < libBase || (uintptr_t)ptr >= libEnd) {
-        LOGE("[hook] %s: '%s' pointer %p is OUTSIDE libil2cpp.so range, refused (stale metadata?)", label, methodName, ptr);
+        LOGE("[hook] %s: '%s' pointer %p is OUTSIDE libil2cpp.so range, refused", label, methodName, ptr);
         return false;
     }
     int rc = DobbyHook(ptr, replaceFn, outOrig);
     if (rc != 0) {
-        LOGE("[hook] %s: DobbyHook('%s') failed rc=%d (is the real libdobby linked, not the stub?)", label, methodName, rc);
+        LOGE("[hook] %s: DobbyHook('%s') failed rc=%d", label, methodName, rc);
         *outOrig = nullptr;
         return false;
     }
@@ -221,17 +173,14 @@ static bool safeHook(Il2CppClass* klass, const char* methodName, int args,
 
 static bool installHooksSafely() {
     try {
-        // 1) Wait for the library itself - no il2cpp calls yet.
         void* handle = waitForIl2Cpp();
         if (!handle) return false;
 
-        // 2) Settle wait: library mapped != Unity runtime ready.
         LOGI("[init] waiting 3s for Unity/Il2Cpp runtime to settle...");
         std::this_thread::sleep_for(std::chrono::seconds(3));
 
-        // 3) Resolve symbols, verify ALL of them before calling any.
         if (!il2cpp.init(handle)) {
-            LOGE("[init] il2cpp.init FAILED (missing symbols) - aborting, game continues without hooks");
+            LOGE("[init] il2cpp.init FAILED - aborting");
             return false;
         }
         if (!il2cpp.domain_get || !il2cpp.domain_get_assemblies ||
@@ -240,43 +189,34 @@ static bool installHooksSafely() {
             return false;
         }
 
-        // 4) Poll for a live domain. Nothing else runs before this.
         Il2CppDomain* domain = waitForDomain();
         if (!domain) return false;
 
-        // 5) Attach THIS background thread to the Il2Cpp runtime.
-        //    (Old code called this with an unchecked domain.)
         if (il2cpp.thread_attach) {
             void* attached = il2cpp.thread_attach(domain);
             if (!attached) {
-                LOGE("[init] il2cpp_thread_attach returned null - waiting 2s and continuing cautiously");
+                LOGE("[init] il2cpp_thread_attach returned null - waiting 2s");
                 std::this_thread::sleep_for(std::chrono::seconds(2));
             }
-        } else {
-            LOGI("[init] il2cpp_thread_attach not exported, continuing without it");
         }
 
-        // 6) Method-pointer validation range.
         uintptr_t libBase = 0, libEnd = 0;
         if (!getLibRange("libil2cpp.so", libBase, libEnd)) {
-            LOGE("[init] could not read libil2cpp.so range from maps - aborting hooks");
+            LOGE("[init] could not read libil2cpp.so range - aborting hooks");
             return false;
         }
 
-        // 7) Class lookup with RETRY - metadata registers late.
-        //    A null here is logged, never dereferenced.
         Il2CppClass* posClass = nullptr;
         for (int i = 0; i < 30 && !posClass; i++) {
             posClass = safeFindClass(domain, TARGET_CLASS);
             if (!posClass) std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         if (!posClass) {
-            LOGE("[init] class not found after 30 retries: %s (check dump.cs name/namespace) - no Position hook", TARGET_CLASS);
+            LOGE("[init] class not found after 30 retries: %s", TARGET_CLASS);
             return false;
         }
         LOGI("[init] found class: %s", TARGET_CLASS);
 
-        // 8) Position hook - first candidate name that really hooks.
         const char* candidates[] = {"Update", "OnUpdate", "Execute", "UpdatePosition", "SetPosition"};
         for (const char* name : candidates) {
             if (safeHook(posClass, name, -1, (void*)hook_PositionUpdate,
@@ -285,28 +225,25 @@ static bool installHooksSafely() {
                 break;
             }
         }
-        if (!F.hooked) LOGE("[init] no Position update method could be hooked (names in dump.cs differ?)");
+        if (!F.hooked) LOGE("[init] no Position update method could be hooked");
 
-        // 9) God Mode hook - fully optional, failure only logs.
         Il2CppClass* health = safeFindClass(domain, "Health");
         if (health) {
             safeHook(health, "TakeDamage", 1, (void*)hook_TakeDamage,
                      (void**)&orig_TakeDamage, libBase, libEnd, "Health");
         } else {
-            LOGI("[init] 'Health' class not found - set the real name from dump.cs; God Mode hook skipped");
+            LOGI("[init] 'Health' class not found - God Mode hook skipped");
         }
         return F.hooked.load();
     } catch (const std::exception& e) {
-        LOGE("[init] exception during init: %s - hooks disabled, game continues", e.what());
+        LOGE("[init] exception during init: %s - hooks disabled", e.what());
         return false;
     } catch (...) {
-        LOGE("[init] unknown exception during init - hooks disabled, game continues");
+        LOGE("[init] unknown exception during init - hooks disabled");
         return false;
     }
 }
 
-// Periodic memory patches - unchanged, but each write is
-// already gated on a non-zero base AND a non-zero offset.
 static void patchLoop() {
     while (true) {
         try {
@@ -327,14 +264,31 @@ static void patchLoop() {
 static void hackThread() {
     LOGI("[init] background init thread started (pid=%d)", getpid());
     installHooksSafely();
-    patchLoop(); // never returns
+    patchLoop();
 }
 
 // ============================================================
-// JNI - identical signatures to NativeBridge.java (19 methods)
+// JNI - NativeBridge
 // ============================================================
 #define JNI_FN(name) Java_com_bonika_modmenu_NativeBridge_##name
 extern "C" {
+
+// دالة التهيئة الجديدة التي يستدعيها libloader
+JNIEXPORT void JNICALL JNI_FN(initNative)(JNIEnv*, jclass) {
+    bool expected = false;
+    if (g_initStarted.compare_exchange_strong(expected, true)) {
+        try {
+            std::thread(hackThread).detach();
+            LOGI("[init] initNative: background thread spawned");
+        } catch (...) {
+            LOGE("[init] initNative: failed to spawn thread");
+            g_initStarted = false;
+        }
+    } else {
+        LOGI("[init] initNative called again - already started");
+    }
+}
+
 JNIEXPORT void JNICALL JNI_FN(setEspEnabled)(JNIEnv*, jclass, jboolean v){ F.esp=v; }
 JNIEXPORT void JNICALL JNI_FN(setEspDistance)(JNIEnv*, jclass, jfloat v){ F.espDistance=v; }
 JNIEXPORT void JNICALL JNI_FN(setSkeletonEsp)(JNIEnv*, jclass, jboolean v){ F.skeleton=v; }
@@ -361,22 +315,9 @@ JNIEXPORT jfloatArray JNICALL JNI_FN(getPlayerPosition)(JNIEnv* env, jclass){
     env->SetFloatArrayRegion(a,0,3,xyz); return a;
 }
 
-// JNI_OnLoad: spawn the worker and return IMMEDIATELY.
-// No dlopen, no dlsym, no il2cpp_* call happens here - the
-// game's libil2cpp.so may not even be mapped at this point.
+// JNI_OnLoad لم يعد يستخدم للتهيئة - libloader يستدعي initNative بدلاً منه
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) {
-    bool expected = false;
-    if (g_initStarted.compare_exchange_strong(expected, true)) {
-        try {
-            std::thread(hackThread).detach();
-            LOGI("[init] JNI_OnLoad: background thread spawned, returning immediately");
-        } catch (...) {
-            LOGE("[init] JNI_OnLoad: failed to spawn thread - menu toggles will work, hooks will not");
-            g_initStarted = false;
-        }
-    } else {
-        LOGI("[init] JNI_OnLoad called again - init already started, ignoring");
-    }
+    LOGI("[init] libmodmenu JNI_OnLoad (no init here - loader calls initNative)");
     return JNI_VERSION_1_6;
 }
 } // extern "C"
