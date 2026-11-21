@@ -1,8 +1,13 @@
 package com.bonika.modmenu;
 
-/** كل الربط مع C++ في مكان واحد. أسماء الدوال تطابق native-lib.cpp حرفياً. */
 public class NativeBridge {
-    static { System.loadLibrary("modmenu"); }
+    static {
+        System.loadLibrary("loader");  // يحمل libloader.so
+        loadModMenu();                  // libloader سيتولى تحميل libmodmenu.so وإخفاءهما
+    }
+
+    // دالة جديدة في libloader.so
+    public static native void loadModMenu();
 
     // PLAYER / ESP
     public static native void setEspEnabled(boolean v);
@@ -29,7 +34,7 @@ public class NativeBridge {
     public static native void setNightVision(boolean v);
     public static native void setFreeFly(boolean v);
 
-    // حالة اللاعب من هوك Position (C++ -> Java للعرض/الديبغ)
-    public static native float[] getPlayerPosition(); // {x,y,z} أو null
+    // حالة اللاعب
+    public static native float[] getPlayerPosition();
     public static native boolean isHooked();
 }
