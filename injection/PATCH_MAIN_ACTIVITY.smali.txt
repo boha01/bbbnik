@@ -1,0 +1,30 @@
+============================================================
+6 - SMALI INJECTION SNIPPET
+============================================================
+
+1) في أكتيفيتي اللعبة الرئيسية (غالباً com.unity3d.player.UnityPlayerActivity)
+   افتح ملفها .smali وأضف داخل onCreate بعد invoke-super ...onCreate:
+
+    invoke-static {p0}, Lcom/bonika/modmenu/Loader;->start(Landroid/content/Context;)V
+
+   مثال سياق:
+    .method protected onCreate(Landroid/os/Bundle;)V
+        .locals 1
+        invoke-super {p0, p1}, Landroid/app/Activity;->onCreate(Landroid/os/Bundle;)V
+        invoke-static {p0}, Lcom/bonika/modmenu/Loader;->start(Landroid/content/Context;)V
+        # ... باقي onCreate الأصلي
+
+2) في AndroidManifest.xml للعبة، داخل <application> أضف:
+    <service android:name="com.bonika.modmenu.FloatingService"
+             android:enabled="true" android:exported="false"
+             android:foregroundServiceType="specialUse"/>
+
+   وفي أعلى الـ Manifest أضف إن لم توجد:
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+
+3) انسخ:
+   - classes من modmenu.apk: فكّه وانقل مجلد smali/com/bonika/modmenu/
+     إلى مجلد smali_classesX/ المناسب في اللعبة المفكوكة (أو ضع dex كـ classes2.dex إضافي)
+   - libmodmenu.so + libdobby.so (إن استعملته منفصلاً) إلى:
+     lib/arm64-v8a/  و  lib/armeabi-v7a/  حسب معمارية اللعبة
