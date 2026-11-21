@@ -5,6 +5,8 @@ import android.content.*;
 import android.graphics.*;
 import android.graphics.drawable.*;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.*;
 import android.text.style.*;
 import android.view.*;
@@ -12,7 +14,7 @@ import android.view.animation.DecelerateInterpolator;
 import android.widget.*;
 
 /**
- * MenuOverlay v3 — boha xvip
+ * MenuOverlay v4 — boha xvip (long-press drag added)
  * Black / red redesign matching bonika's reference image:
  * near-black panel, left sidebar (Home / Aim / Visual / Misc / Config),
  * red toggles and sliders, his circular logo in the header, status footer.
@@ -62,7 +64,8 @@ public class MenuOverlay {
         w = clamp(w, dp(320), dp(720)); h = clamp(h, dp(230), dp(540));
         params = new WindowManager.LayoutParams(w, h,
                 overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
-        params.gravity = Gravity.TOP | Gravity.START; params.x = dp(16); params.y = dp(48);
+        params.gravity = Gravity.TOP | Gravity.START;
+        params.x = prefs.getInt("menuX", dp(16)); params.y = prefs.getInt("menuY", dp(48));
         wm.addView(root, params);
         applyOpacity();
         root.setAlpha(0f); root.setScaleX(0.92f); root.setScaleY(0.92f);
@@ -324,7 +327,8 @@ public class MenuOverlay {
             if (!bubbleAdded) {
                 bubbleParams = new WindowManager.LayoutParams(dp(56), dp(56), overlayType(),
                         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
-                bubbleParams.gravity = Gravity.TOP | Gravity.START; bubbleParams.x = dp(14); bubbleParams.y = dp(120);
+                bubbleParams.gravity = Gravity.TOP | Gravity.START;
+                bubbleParams.x = prefs.getInt("bubbleX", dp(14)); bubbleParams.y = prefs.getInt("bubbleY", dp(120));
                 wm.addView(bubble, bubbleParams); bubbleAdded = true;
                 makeDraggable(bubble, true);
             }
@@ -341,28 +345,57 @@ public class MenuOverlay {
         }
     }
 
-    // ---------- drag (live params + threshold, clicks still work) ----------
+    // ---------- drag: LONG-PRESS then move (v4, bonika's request) ----------
+    // A normal tap does nothing to position (buttons / toggles / sliders keep working).
+    // Press and HOLD ~400ms on the header (or on the bubble) -> drag activates with a
+    // small haptic + scale pop, then moving the finger moves the whole window smoothly
+    // by updating the LIVE LayoutParams. Releasing the finger ends the drag.
     private void makeDraggable(final View v, final boolean isBubble) {
+        final Handler handler = new Handler(Looper.getMainLooper());
         v.setOnTouchListener(new View.OnTouchListener() {
-            int startX, startY; float touchX, touchY; boolean moved;
+            int startX, startY; float touchX, touchY;
+            boolean longPressed = false, cancelled = false;
+            final Runnable activateDrag = () -> {
+                if (cancelled) return;
+                longPressed = true;
+                if (haptic) v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                View target = isBubble ? bubble : root;
+                if (target != null) target.animate().scaleX(1.03f).scaleY(1.03f).setDuration(120).start();
+            };
             public boolean onTouch(View view, MotionEvent e) {
                 WindowManager.LayoutParams pr = isBubble ? bubbleParams : params;
                 if (pr == null) return false;
-                switch (e.getAction()) {
+                switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
-                        startX = pr.x; startY = pr.y; touchX = e.getRawX(); touchY = e.getRawY(); moved = false;
-                        return false; // لا تستهلك اللمسة: الأزرار داخل الهيدر لازم تستقبل نقراتها
+                        startX = pr.x; startY = pr.y; touchX = e.getRawX(); touchY = e.getRawY();
+                        longPressed = false; cancelled = false;
+                        handler.removeCallbacks(activateDrag);
+                        handler.postDelayed(activateDrag, 400); // الضغط المطوّل
+                        return false; // لا تستهلك: نقرة عادية لازم توصل للأزرار
                     case MotionEvent.ACTION_MOVE:
                         int dx = (int) (e.getRawX() - touchX), dy = (int) (e.getRawY() - touchY);
-                        if (!moved && Math.abs(dx) + Math.abs(dy) > dp(6)) moved = true;
-                        if (moved) {
-                            pr.x = startX + dx; pr.y = startY + dy;
-                            try { wm.updateViewLayout(isBubble ? bubble : root, pr); } catch (Exception ignored) {}
-                            return true;
+                        if (!longPressed) {
+                            // تحرّك كثير قبل ما يكمل الضغط المطوّل = تمرير عادي، ألغِ التفعيل
+                            if (Math.abs(dx) + Math.abs(dy) > dp(10)) {
+                                cancelled = true; handler.removeCallbacks(activateDrag);
+                            }
+                            return false;
+                        }
+                        pr.x = startX + dx; pr.y = startY + dy;
+                        try { wm.updateViewLayout(isBubble ? bubble : root, pr); } catch (Exception ignored) {}
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                    case MotionEvent.ACTION_CANCEL:
+                        handler.removeCallbacks(activateDrag);
+                        if (longPressed) {
+                            View target = isBubble ? bubble : root;
+                            if (target != null) target.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
+                            // احفظ آخر موقع عشان يرجع مثل ما تركته
+                            try { prefs.edit().putInt(isBubble ? "bubbleX" : "menuX", pr.x)
+                                    .putInt(isBubble ? "bubbleY" : "menuY", pr.y).apply(); } catch (Exception ignored) {}
+                            return true; // سحب بالضغط المطوّل = استهلك اللمسة
                         }
                         return false;
-                    case MotionEvent.ACTION_UP:
-                        return moved; // سحب = استهلك، نقرة نظيفة = اتركها للنقر
                 }
                 return false;
             }
