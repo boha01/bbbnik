@@ -1,7 +1,5 @@
 // ============================================================
 // loader.cpp - libloader.so
-// وظيفتها الوحيدة: استدعاء initNative من libmodmenu.so ثم إخفاء الاثنين.
-// libmodmenu.so يتم تحميلها مسبقاً عبر System.loadLibrary في Java.
 // ============================================================
 #include <jni.h>
 #include <dlfcn.h>
@@ -12,9 +10,17 @@
 
 #define LOADER_LOG(...) __android_log_print(ANDROID_LOG_INFO, "Loader", __VA_ARGS__)
 
-static void* hideLoaderThread(void*) {
-    sleep(3);
+// خيط إخفاء المكتبتين - ينتظر 15 ثانية لضمان ربط جميع دوال JNI
+static void* hideThread(void*) {
+    sleep(15);  // انتظار 15 ثانية قبل الإخفاء
+    
+    // إخفاء libmodmenu.so أولاً (الأهم)
+    RemapTools::remapLibrary("libmodmenu.so");
+    
+    // انتظار إضافي قبل إخفاء المحمل
+    sleep(2);
     RemapTools::remapLibrary("libloader.so");
+    
     return nullptr;
 }
 
@@ -22,7 +28,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_bonika_modmenu_NativeBridge_loadModMenu(JNIEnv* env, jclass clazz) {
     LOADER_LOG("[*] loadModMenu called");
 
-    // 1. libmodmenu.so تم تحميلها بالفعل عبر System.loadLibrary
+    // 1. التحقق من وجود libmodmenu.so
     void* handle = dlopen("libmodmenu.so", RTLD_NOLOAD | RTLD_NOW);
     if (!handle) {
         LOADER_LOG("[-] libmodmenu.so not loaded!");
@@ -40,16 +46,12 @@ Java_com_bonika_modmenu_NativeBridge_loadModMenu(JNIEnv* env, jclass clazz) {
         LOADER_LOG("[!] initNative not found in libmodmenu");
     }
 
-    // 3. انتظار قصير لضمان اكتمال التهيئة
-    sleep(1);
-
-    // 4. إخفاء libmodmenu.so
-    RemapTools::remapLibrary("libmodmenu.so");
-
-    // 5. إخفاء libloader.so في خيط منفصل
+    // 3. بدء خيط الإخفاء المتأخر (15 ثانية)
     pthread_t t;
-    pthread_create(&t, nullptr, hideLoaderThread, nullptr);
+    pthread_create(&t, nullptr, hideThread, nullptr);
     pthread_detach(t);
+    
+    LOADER_LOG("[*] Hide thread started, will hide libraries in 15 seconds");
 }
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
