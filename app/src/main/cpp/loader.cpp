@@ -12,8 +12,9 @@
 
 #define LOADER_LOG(...) __android_log_print(ANDROID_LOG_INFO, "Loader", __VA_ARGS__)
 
+// خيط إخفاء المحمل نفسه - ينتظر 3 ثوانٍ لضمان عدم استخدامه
 static void* hideLoaderThread(void*) {
-    sleep(1);
+    sleep(3);
     RemapTools::remapLibrary("libloader.so");
     return nullptr;
 }
@@ -30,15 +31,7 @@ Java_com_bonika_modmenu_NativeBridge_loadModMenu(JNIEnv* env, jclass clazz) {
     }
     LOADER_LOG("[+] libmodmenu.so loaded at %p", handle);
 
-    // 2. إخفاء المكتبة الرئيسية فوراً
-    RemapTools::remapLibrary("libmodmenu.so");
-
-    // 3. إخفاء المحمل نفسه في خيط منفصل
-    pthread_t t;
-    pthread_create(&t, nullptr, hideLoaderThread, nullptr);
-    pthread_detach(t);
-
-    // 4. استدعاء دالة التهيئة في المكتبة الرئيسية
+    // 2. استدعاء دالة التهيئة أولاً (دع المكتبة تكمل تهيئتها)
     typedef void (*InitFn)(JNIEnv*, jclass);
     InitFn init = (InitFn)dlsym(handle, "Java_com_bonika_modmenu_NativeBridge_initNative");
     if (init) {
@@ -47,6 +40,17 @@ Java_com_bonika_modmenu_NativeBridge_loadModMenu(JNIEnv* env, jclass clazz) {
     } else {
         LOADER_LOG("[!] initNative not found in libmodmenu");
     }
+
+    // 3. انتظار قصير لضمان اكتمال أي constructors داخلية
+    sleep(1);
+
+    // 4. الآن قم بإخفاء المكتبة الرئيسية (بعد اكتمال التهيئة)
+    RemapTools::remapLibrary("libmodmenu.so");
+
+    // 5. إخفاء المحمل نفسه في خيط منفصل
+    pthread_t t;
+    pthread_create(&t, nullptr, hideLoaderThread, nullptr);
+    pthread_detach(t);
 }
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
