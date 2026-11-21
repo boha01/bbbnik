@@ -5,7 +5,7 @@ struct Features {
     // PLAYER
     std::atomic<bool> esp{false}, skeleton{false}, showNpcs{true}, showVehicles{false};
     std::atomic<float> espDistance{500.f};
-    std::atomic<int> espBoxColor{0xFFA855F7};
+    std::atomic<int> espBoxColor{static_cast<int>(0xFFA855F7)};
     // COMBAT
     std::atomic<bool> godMode{false}, infiniteAmmo{false}, rapidFire{false}, noRecoil{false};
     // VEHICLE
