@@ -273,7 +273,6 @@ static void hackThread() {
 #define JNI_FN(name) Java_com_bonika_modmenu_NativeBridge_##name
 extern "C" {
 
-// دالة التهيئة الجديدة التي يستدعيها libloader
 JNIEXPORT void JNICALL JNI_FN(initNative)(JNIEnv*, jclass) {
     bool expected = false;
     if (g_initStarted.compare_exchange_strong(expected, true)) {
@@ -315,7 +314,6 @@ JNIEXPORT jfloatArray JNICALL JNI_FN(getPlayerPosition)(JNIEnv* env, jclass){
     env->SetFloatArrayRegion(a,0,3,xyz); return a;
 }
 
-// JNI_OnLoad لم يعد يستخدم للتهيئة - libloader يستدعي initNative بدلاً منه
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) {
     LOGI("[init] libmodmenu JNI_OnLoad (no init here - loader calls initNative)");
     return JNI_VERSION_1_6;
