@@ -9,23 +9,48 @@
 #define LOADER_LOG(...) __android_log_print(ANDROID_LOG_INFO, "SysLoader", __VA_ARGS__)
 static JavaVM* g_vm = nullptr;
 
-// نستخدم اسم مكتبة يبدو أصلياً للعبة
+// الاسم المموه الذي سيراه السيرفر
 #define FAKE_LIB_NAME "libdatastore_shared.so"
-// اسم مكتبتنا الحقيقية
-#define REAL_LIB_NAME "libmodmenu.so"
+
+// دالة إخفاء المكتبة (مبسطة لتجنب مشاكل التجميد)
+static bool hideLib(const char* libName) {
+    FILE* fp = fopen("/proc/self/maps", "r");
+    if (!fp) return false;
+    char line[512];
+    uintptr_t start = 0, end = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, libName)) {
+            sscanf(line, "%lx-%lx", &start, &end);
+            break;
+        }
+    }
+    fclose(fp);
+    if (!start) return false;
+    
+    size_t size = end - start;
+    void* newMem = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (newMem == MAP_FAILED) return false;
+    memcpy(newMem, (void*)start, size);
+    
+    // محاولة الإخفاء
+    if (mremap(newMem, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, (void*)start) == MAP_FAILED) {
+        munmap((void*)start, size);
+        void* fixed = mmap((void*)start, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (fixed != MAP_FAILED) memcpy(fixed, newMem, size);
+        munmap(newMem, size);
+    }
+    return true;
+}
 
 static void* initThread(void* arg) {
     JNIEnv* env = nullptr;
     jclass clazz = (jclass)arg;
 
-    LOADER_LOG("[*] Waiting for il2cpp...");
+    LOADER_LOG("[*] Waiting for libil2cpp...");
     int waitCount = 0;
-    FILE* fp = nullptr;
     bool found = false;
-    
-    // ننتظر لود محرك اللعبة
     while (waitCount < 60) {
-        fp = fopen("/proc/self/maps", "r");
+        FILE* fp = fopen("/proc/self/maps", "r");
         if (fp) {
             char line[512];
             while (fgets(line, sizeof(line), fp)) {
@@ -43,47 +68,41 @@ static void* initThread(void* arg) {
         return nullptr;
     }
 
-    sleep(3); // انتظار استقرار
+    sleep(3); // انتظار استقرار اللعبة
 
-    // 1. فتح المكتبة المموهة (التي هي في الحقيقة libmodmenu.so)
-    // نمرر المسار المطلق لضمان التحميل الصحيح
+    // فتح المكتبة بالاسم المموه
     void* handle = dlopen(FAKE_LIB_NAME, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) {
-        LOADER_LOG("[-] dlopen failed: %s", dlerror());
+        LOADER_LOG("[-] dlopen %s failed: %s", FAKE_LIB_NAME, dlerror());
         return nullptr;
     }
 
-    // 2. استدعاء دالة التهيئة الخاصة بك
+    LOADER_LOG("[+] Loaded %s", FAKE_LIB_NAME);
+
+    // استدعاء دالة التهيئة الخاصة بك
     typedef void (*InitFn)(JNIEnv*, jclass);
     InitFn init = (InitFn)dlsym(handle, "Java_com_bonika_modmenu_NativeBridge_initNative");
     if (init) {
         if (g_vm) {
             if (g_vm->AttachCurrentThread(&env, nullptr) == JNI_OK && env) {
                 init(env, clazz);
-                LOADER_LOG("[+] initNative called successfully");
+                LOADER_LOG("[+] initNative called");
                 g_vm->DetachCurrentThread();
             }
         }
     }
 
-    // 3. إخفاء المكتبة المموهة من خرائط الذاكرة (تقنية الـ Remap)
-    sleep(15); 
-    LOADER_LOG("[*] Attempting to hide libraries...");
-    
-    // كود الإخفاء (RemapTools) الذي كتبناه سابقاً
-    // (تأكد من تضمين ملف RemapTools.h في نفس المجلد)
-    extern bool remapLibrary(const char* libName);
-    remapLibrary(FAKE_LIB_NAME);
-    
-    sleep(2);
-    remapLibrary("libloader.so");
+    // إخفاء المكتبات بعد فترة
+    sleep(15);
+    LOADER_LOG("[*] Hiding libraries...");
+    hideLib(FAKE_LIB_NAME);
+    hideLib("libloader.so");
 
     return nullptr;
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_bonika_modmenu_NativeBridge_loadModMenu(JNIEnv* env, jclass clazz) {
-    LOADER_LOG("[*] Starting background thread");
     pthread_t t;
     pthread_create(&t, nullptr, initThread, (void*)clazz);
     pthread_detach(t);
