@@ -10,10 +10,11 @@
 #define LOADER_LOG(...) __android_log_print(ANDROID_LOG_INFO, "SysLoader", __VA_ARGS__)
 static JavaVM* g_vm = nullptr;
 
+// الاسم المموه للمكتبة الرئيسية
 #define FAKE_LIB_NAME "libdatastore_shared.so"
 
+// دالة إخفاء المكتبة من الذاكرة
 static void hideLib(const char* libName) {
-    // ... (نفس كود الإخفاء السابق) ...
     FILE* fp = fopen("/proc/self/maps", "r");
     if (!fp) return;
     char line[512];
@@ -23,76 +24,49 @@ static void hideLib(const char* libName) {
     }
     fclose(fp);
     if (!start || start >= end) return;
+    
     size_t size = end - start;
     void* newMem = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (newMem == MAP_FAILED) return;
     memcpy(newMem, (void*)start, size);
+    
     if (mremap(newMem, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, (void*)start) == MAP_FAILED) {
         munmap((void*)start, size);
         void* fixed = mmap((void*)start, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
         if (fixed != MAP_FAILED) memcpy(fixed, newMem, size);
         munmap(newMem, size);
     }
-}
-
-// دالة مساعدة لتشغيل الخدمة من C++
-static void startFloatingService(JNIEnv* env) {
-    jclass intentClass = env->FindClass("android/content/Intent");
-    jclass serviceClass = env->FindClass("com/bonika/modmenu/FloatingService");
-    if (!intentClass || !serviceClass) {
-        LOADER_LOG("[-] Could not find Intent or FloatingService classes");
-        return;
-    }
-    
-    jmethodID intentInit = env->GetMethodID(intentClass, "<init>", "(Landroid/content/Context;Ljava/lang/Class;)V");
-    jmethodID startService = env->GetMethodID(env->FindClass("android/content/ContextWrapper"), "startService", "(Landroid/content/Intent;)Landroid/content/ComponentName;");
-
-    // نحتاج إلى سياق التطبيق (ActivityThread.currentApplication())
-    jclass activityThread = env->FindClass("android/app/ActivityThread");
-    jmethodID currentApp = env->GetStaticMethodID(activityThread, "currentApplication", "()Landroid/app/Application;");
-    jobject app = env->CallStaticObjectMethod(activityThread, currentApp);
-    
-    if (app && intentInit && startService) {
-        jobject intent = env->NewObject(intentClass, intentInit, app, serviceClass);
-        env->CallObjectMethod(app, startService, intent);
-        LOADER_LOG("[+] FloatingService started via JNI");
-    } else {
-        LOADER_LOG("[-] Failed to start service");
-    }
+    LOADER_LOG("[+] Hid %s", libName);
 }
 
 static void* initThread(void* arg) {
     JNIEnv* env = nullptr;
     
-    // ننتظر 10 ثوانٍ لضمان تحميل Unity
-    sleep(10);
+    // انتظار استقرار اللعبة قبل تحميل المود
+    sleep(5); 
 
-    // تحميل المكتبة المموهة
     void* handle = dlopen(FAKE_LIB_NAME, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) {
         LOADER_LOG("[-] dlopen failed: %s", dlerror());
         return nullptr;
     }
-
     LOADER_LOG("[+] Loaded %s", FAKE_LIB_NAME);
 
-    // استدعاء initNative الخاصة بك
+    // استدعاء دالة التهيئة الخاصة بالهوكات
     typedef void (*InitFn)(JNIEnv*, jclass);
     InitFn init = (InitFn)dlsym(handle, "Java_com_bonika_modmenu_NativeBridge_initNative");
     
     if (g_vm && g_vm->AttachCurrentThread(&env, nullptr) == JNI_OK && env) {
         if (init) {
-            init(env, nullptr); // نمرر null كـ jclass لأننا في خيط C++
+            init(env, nullptr); 
+            LOADER_LOG("[+] initNative called");
         }
-        
-        // الآن نشغل الخدمة من C++ مباشرة
-        startFloatingService(env);
-        
         g_vm->DetachCurrentThread();
     }
 
-    // إخفاء المكتبات
+    // إخفاء المكتبات بعد 10 ثوانٍ من التحميل
     sleep(10);
+    LOADER_LOG("[*] Hiding libraries...");
     hideLib(FAKE_LIB_NAME);
     hideLib("libloader.so");
 
