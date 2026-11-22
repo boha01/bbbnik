@@ -5,56 +5,55 @@
 #include <android/log.h>
 #include <cstring>
 #include <cstdio>
-#include "RemapTools.h"
 
-#define LOADER_LOG(...) __android_log_print(ANDROID_LOG_INFO, "Loader", __VA_ARGS__)
-
+#define LOADER_LOG(...) __android_log_print(ANDROID_LOG_INFO, "SysLoader", __VA_ARGS__)
 static JavaVM* g_vm = nullptr;
 
-// دالة للتحقق من وجود مكتبة في خريطة الذاكرة
-static bool isLibraryLoaded(const char* libName) {
-    FILE* fp = fopen("/proc/self/maps", "r");
-    if (!fp) return false;
-    char line[512];
-    bool found = false;
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, libName)) { found = true; break; }
-    }
-    fclose(fp);
-    return found;
-}
+// نستخدم اسم مكتبة يبدو أصلياً للعبة
+#define FAKE_LIB_NAME "libdatastore_shared.so"
+// اسم مكتبتنا الحقيقية
+#define REAL_LIB_NAME "libmodmenu.so"
 
-// الخيط الخلفي الذي سينتظر بدون أن يجمد واجهة المود مينيو
 static void* initThread(void* arg) {
     JNIEnv* env = nullptr;
     jclass clazz = (jclass)arg;
 
-    LOADER_LOG("[*] Background thread started. Waiting for libil2cpp.so...");
-
-    // 1. انتظار libil2cpp.so (بحد أقصى 60 ثانية)
+    LOADER_LOG("[*] Waiting for il2cpp...");
     int waitCount = 0;
-    while (!isLibraryLoaded("libil2cpp.so") && waitCount < 60) {
+    FILE* fp = nullptr;
+    bool found = false;
+    
+    // ننتظر لود محرك اللعبة
+    while (waitCount < 60) {
+        fp = fopen("/proc/self/maps", "r");
+        if (fp) {
+            char line[512];
+            while (fgets(line, sizeof(line), fp)) {
+                if (strstr(line, "libil2cpp.so")) { found = true; break; }
+            }
+            fclose(fp);
+        }
+        if (found) break;
         sleep(1);
         waitCount++;
     }
 
-    if (waitCount >= 60) {
-        LOADER_LOG("[-] Timeout: libil2cpp.so not found. Aborting mod init.");
+    if (!found) {
+        LOADER_LOG("[-] il2cpp not found. Aborting.");
         return nullptr;
     }
-    LOADER_LOG("[+] libil2cpp.so detected in memory after %d seconds", waitCount);
 
-    // 2. انتظار إضافي لضمان تهيئة Unity بالكامل
-    sleep(5);
+    sleep(3); // انتظار استقرار
 
-    // 3. تحميل المكتبة الرئيسية
-    void* handle = dlopen("libmodmenu.so", RTLD_NOLOAD | RTLD_NOW);
+    // 1. فتح المكتبة المموهة (التي هي في الحقيقة libmodmenu.so)
+    // نمرر المسار المطلق لضمان التحميل الصحيح
+    void* handle = dlopen(FAKE_LIB_NAME, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) {
-        LOADER_LOG("[-] dlopen(libmodmenu.so) failed!");
+        LOADER_LOG("[-] dlopen failed: %s", dlerror());
         return nullptr;
     }
 
-    // 4. استدعاء initNative
+    // 2. استدعاء دالة التهيئة الخاصة بك
     typedef void (*InitFn)(JNIEnv*, jclass);
     InitFn init = (InitFn)dlsym(handle, "Java_com_bonika_modmenu_NativeBridge_initNative");
     if (init) {
@@ -63,40 +62,34 @@ static void* initThread(void* arg) {
                 init(env, clazz);
                 LOADER_LOG("[+] initNative called successfully");
                 g_vm->DetachCurrentThread();
-            } else {
-                LOADER_LOG("[-] Failed to attach thread to JVM");
             }
-        } else {
-            LOADER_LOG("[-] JavaVM is null, cannot call initNative");
         }
-    } else {
-        LOADER_LOG("[-] initNative function not found in libmodmenu.so");
     }
 
-    // 5. الإخفاء المتأخر (بعد 20 ثانية إضافية لضمان استقرار اللعبة)
-    sleep(20);
+    // 3. إخفاء المكتبة المموهة من خرائط الذاكرة (تقنية الـ Remap)
+    sleep(15); 
     LOADER_LOG("[*] Attempting to hide libraries...");
-    RemapTools::remapLibrary("libmodmenu.so");
+    
+    // كود الإخفاء (RemapTools) الذي كتبناه سابقاً
+    // (تأكد من تضمين ملف RemapTools.h في نفس المجلد)
+    extern bool remapLibrary(const char* libName);
+    remapLibrary(FAKE_LIB_NAME);
+    
     sleep(2);
-    RemapTools::remapLibrary("libloader.so");
+    remapLibrary("libloader.so");
 
     return nullptr;
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_bonika_modmenu_NativeBridge_loadModMenu(JNIEnv* env, jclass clazz) {
-    LOADER_LOG("[*] loadModMenu called, starting background init thread");
-
-    // بدء الخيط الخلفي فوراً والعودة (بدون انتظار)
+    LOADER_LOG("[*] Starting background thread");
     pthread_t t;
     pthread_create(&t, nullptr, initThread, (void*)clazz);
     pthread_detach(t);
-    
-    LOADER_LOG("[*] Background thread spawned, returning to Java immediately");
 }
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     g_vm = vm;
-    LOADER_LOG("[*] libloader JNI_OnLoad");
     return JNI_VERSION_1_6;
 }
