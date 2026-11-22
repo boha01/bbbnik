@@ -2,7 +2,9 @@ package com.bonika.modmenu;
 
 public class NativeBridge {
     static {
+        // تحميل المحمل فقط
         System.loadLibrary("loader"); 
+        // استدعاء دالة التهيئة التي ستبدأ الخيط في C++ لتحميل المكتبة المموهة
         loadModMenu(); 
     }
 
