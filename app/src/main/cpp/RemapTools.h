@@ -41,6 +41,7 @@ inline bool remapLibrary(const char* libName) {
     size_t size = range.end - range.start;
     REMAP_LOG("[*] %s: range 0x%lx-0x%lx (size=%zu)", libName, range.start, range.end, size);
 
+    // 1. حجز ذاكرة مجهولة جديدة (RWX)
     void* newMem = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (newMem == MAP_FAILED) {
@@ -48,10 +49,13 @@ inline bool remapLibrary(const char* libName) {
         return false;
     }
 
+    // 2. نسخ محتوى المكتبة
     memcpy(newMem, (void*)range.start, size);
 
+    // 3. محاولة mremap مع MREMAP_FIXED
     void* result = mremap(newMem, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, (void*)range.start);
     if (result == MAP_FAILED) {
+        // البديل: munmap + mmap على نفس العنوان + memcpy
         REMAP_LOG("[!] mremap failed, trying munmap+mmap fallback for %s", libName);
         munmap((void*)range.start, size);
         void* fixed = mmap((void*)range.start, size, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -65,7 +69,7 @@ inline bool remapLibrary(const char* libName) {
         munmap(newMem, size);
     }
 
-    // لا نغير الصلاحيات هنا لتفادي مشاكل ART
+    // ملاحظة: لا نقوم بتغيير الصلاحيات إلى RX فقط، نتركها RWX لتجنب انهيار ART
     REMAP_LOG("[+] %s hidden successfully", libName);
     return true;
 }
