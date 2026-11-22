@@ -2,12 +2,10 @@ package com.bonika.modmenu;
 
 public class NativeBridge {
     static {
-        System.loadLibrary("loader");   // libloader.so أولاً
-        System.loadLibrary("modmenu");  // libmodmenu.so (لتفعيل دوال JNI)
-        loadModMenu();                   // libloader يستدعي initNative ويخفي الاثنين
+        System.loadLibrary("loader"); 
+        loadModMenu(); 
     }
 
-    // دالة جديدة في libloader.so
     public static native void loadModMenu();
 
     // PLAYER / ESP
