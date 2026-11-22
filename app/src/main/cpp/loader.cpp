@@ -1,6 +1,3 @@
-// ============================================================
-// loader.cpp - libloader.so
-// ============================================================
 #include <jni.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -12,7 +9,9 @@
 
 #define LOADER_LOG(...) __android_log_print(ANDROID_LOG_INFO, "Loader", __VA_ARGS__)
 
-// دالة للتحقق من وجود مكتبة معينة في خريطة الذاكرة
+static JavaVM* g_vm = nullptr;
+
+// دالة للتحقق من وجود مكتبة في خريطة الذاكرة
 static bool isLibraryLoaded(const char* libName) {
     FILE* fp = fopen("/proc/self/maps", "r");
     if (!fp) return false;
@@ -25,21 +24,14 @@ static bool isLibraryLoaded(const char* libName) {
     return found;
 }
 
-// خيط الإخفاء - ينتظر 20 ثانية لضمان استقرار اللعبة
-static void* hideThread(void*) {
-    sleep(20); 
-    LOADER_LOG("[*] Attempting to hide libraries...");
-    RemapTools::remapLibrary("libmodmenu.so");
-    sleep(2);
-    RemapTools::remapLibrary("libloader.so");
-    return nullptr;
-}
+// الخيط الخلفي الذي سينتظر بدون أن يجمد واجهة المود مينيو
+static void* initThread(void* arg) {
+    JNIEnv* env = nullptr;
+    jclass clazz = (jclass)arg;
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_bonika_modmenu_NativeBridge_loadModMenu(JNIEnv* env, jclass clazz) {
-    LOADER_LOG("[*] loadModMenu called. Waiting for libil2cpp.so...");
+    LOADER_LOG("[*] Background thread started. Waiting for libil2cpp.so...");
 
-    // 1. انتظار ظهور libil2cpp.so في الذاكرة (بحد أقصى 60 ثانية)
+    // 1. انتظار libil2cpp.so (بحد أقصى 60 ثانية)
     int waitCount = 0;
     while (!isLibraryLoaded("libil2cpp.so") && waitCount < 60) {
         sleep(1);
@@ -48,38 +40,63 @@ Java_com_bonika_modmenu_NativeBridge_loadModMenu(JNIEnv* env, jclass clazz) {
 
     if (waitCount >= 60) {
         LOADER_LOG("[-] Timeout: libil2cpp.so not found. Aborting mod init.");
-        return;
+        return nullptr;
     }
     LOADER_LOG("[+] libil2cpp.so detected in memory after %d seconds", waitCount);
 
-    // 2. انتظار إضافي لضمان تهيئة Unity بالكامل (لتجنب NULL ptr)
+    // 2. انتظار إضافي لضمان تهيئة Unity بالكامل
     sleep(5);
 
     // 3. تحميل المكتبة الرئيسية
     void* handle = dlopen("libmodmenu.so", RTLD_NOLOAD | RTLD_NOW);
     if (!handle) {
         LOADER_LOG("[-] dlopen(libmodmenu.so) failed!");
-        return;
+        return nullptr;
     }
-    LOADER_LOG("[+] libmodmenu.so loaded at %p", handle);
 
     // 4. استدعاء initNative
     typedef void (*InitFn)(JNIEnv*, jclass);
     InitFn init = (InitFn)dlsym(handle, "Java_com_bonika_modmenu_NativeBridge_initNative");
     if (init) {
-        init(env, clazz);
-        LOADER_LOG("[+] initNative called");
+        if (g_vm) {
+            if (g_vm->AttachCurrentThread(&env, nullptr) == JNI_OK && env) {
+                init(env, clazz);
+                LOADER_LOG("[+] initNative called successfully");
+                g_vm->DetachCurrentThread();
+            } else {
+                LOADER_LOG("[-] Failed to attach thread to JVM");
+            }
+        } else {
+            LOADER_LOG("[-] JavaVM is null, cannot call initNative");
+        }
     } else {
-        LOADER_LOG("[!] initNative not found in libmodmenu");
+        LOADER_LOG("[-] initNative function not found in libmodmenu.so");
     }
 
-    // 5. بدء خيط الإخفاء المتأخر (بعد 20 ثانية من الآن)
+    // 5. الإخفاء المتأخر (بعد 20 ثانية إضافية لضمان استقرار اللعبة)
+    sleep(20);
+    LOADER_LOG("[*] Attempting to hide libraries...");
+    RemapTools::remapLibrary("libmodmenu.so");
+    sleep(2);
+    RemapTools::remapLibrary("libloader.so");
+
+    return nullptr;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_bonika_modmenu_NativeBridge_loadModMenu(JNIEnv* env, jclass clazz) {
+    LOADER_LOG("[*] loadModMenu called, starting background init thread");
+
+    // بدء الخيط الخلفي فوراً والعودة (بدون انتظار)
     pthread_t t;
-    pthread_create(&t, nullptr, hideThread, nullptr);
+    pthread_create(&t, nullptr, initThread, (void*)clazz);
     pthread_detach(t);
+    
+    LOADER_LOG("[*] Background thread spawned, returning to Java immediately");
 }
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
+    g_vm = vm;
     LOADER_LOG("[*] libloader JNI_OnLoad");
     return JNI_VERSION_1_6;
 }
