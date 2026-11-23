@@ -2,13 +2,9 @@ package com.bonika.modmenu;
 
 public class NativeBridge {
     static {
-        // تحميل المحمل فقط
-        System.loadLibrary("loader"); 
-        // استدعاء دالة التهيئة التي ستبدأ الخيط في C++ لتحميل المكتبة المموهة
-        loadModMenu(); 
+        // تحميل مكتبة المود مباشرة — JNI_OnLoad فيها يبدأ خيط التهيئة الآمن بنفسه
+        System.loadLibrary("modmenu");
     }
-
-    public static native void loadModMenu();
 
     // PLAYER / ESP
     public static native void setEspEnabled(boolean v);
