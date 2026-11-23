@@ -1,6 +1,5 @@
 package com.bonika.modmenu;
 
-import android.animation.ValueAnimator;
 import android.app.Service;
 import android.content.*;
 import android.graphics.*;
@@ -13,31 +12,38 @@ import android.view.animation.DecelerateInterpolator;
 import android.widget.*;
 
 /**
- * MenuOverlay v6 — boha xvip (DIRECT drag, no long-press + closer to the reference design)
- * Changes from v5, per bonika's request (2026-11-23):
- *  - Dragging is now DIRECT: touch the header (or the bubble) and move — the window
- *    follows the finger immediately. The 400ms long-press timer is gone entirely.
- *    A small 6dp touch slop keeps plain taps working (header buttons are children and
- *    are hit-tested first; a tap on the bubble still fires its OnClickListener).
- *  - Drag positions are clamped on-screen, so the menu/bubble can never be lost
- *    off an edge; on release the bubble smoothly snaps to the nearest side edge.
- *  - Design moved closer to his reference image: horizontal sidebar rows
- *    (icon + label, active = red gradient pill), features grouped as rows with
- *    dividers inside ONE content card per page (like the reference), dark
- *    Reset button with red border, panel background a black -> deep-maroon
- *    gradient with a red stroke, gold crown next to the header title.
- * Everything else is unchanged from v5: same pages and features, same sidebar
- * (Home / Aim / Visual / Misc / Config), same status footer, minimize hides
- * smoothly to the floating bubble, X / "Remove Menu Completely" removes BOTH
- * views and stops FloatingService, bottom-right grip resizes live (menuW/menuH).
- * All NativeBridge calls and prefs keys from v2 are preserved unchanged.
+ * MenuOverlay v7 — boha xvip (fixes from bonika's on-device test of v6, 2026-11-23)
+ *  1) BUBBLE TAP FIXED: in v6 the bubble's OnClickListener could NEVER fire — the
+ *     drag touch-listener consumes ACTION_DOWN, so the click machinery never sees
+ *     the press and the tap did nothing. The bubble now handles the tap itself
+ *     inside its touch listener (UP without a drag = reopen the menu).
+ *  2) WHOLE-MENU DRAG: v6 dragged from the header only. Now the ROOT view
+ *     intercepts gestures: grab the panel ANYWHERE and move it. It is
+ *     direction-aware so nothing else breaks: a vertical-dominant drag that
+ *     starts on the page area still scrolls the page, slider drags are never
+ *     stolen (SeekBar tracking flag), the resize grip keeps its own gesture,
+ *     and plain taps still reach every button/toggle (children get the gesture
+ *     first; interception only steals it once it becomes a real move).
+ *  3) The bubble no longer snaps to an edge on release — it stays exactly
+ *     where it is dropped (v6's snap made drops feel like they "didn't stick").
+ *  4) PALETTE: strict black <-> red shades only (bonika: "اسود واحمر بدرجات").
+ *     Cards/strokes/tracks are deep red-blacks, muted text is warm rose-grey,
+ *     the crown and the Online dot are red now (no gold, no green in the UI
+ *     chrome; the ESP colour picker keeps its functional colours). Feature
+ *     icons sit in small dark-red chips like the reference.
+ *  5) Resize grip enlarged to 36dp with its own dark-red background so it is
+ *     findable, and the footer got right padding so Reset is never under it.
+ * Everything else is unchanged: same pages/features, sidebar, status footer,
+ * minimize-to-bubble vs remove-completely, live resize (menuW/menuH), position
+ * saving, on-screen clamping. All NativeBridge calls and prefs keys preserved.
  * Logo: reads drawable "boha_logo" if present, otherwise falls back to a red "B" circle.
  */
 public class MenuOverlay {
-    static final int BG = 0xF50A0A0C, PANEL = 0xFF111114, SIDEBAR = 0xFF0D0D10,
-            CARD = 0xFF17171B, STROKE = 0xFF26262C, TRACK = 0xFF2A2A30,
+    // لوحة ألوان صارمة: أسود وأحمر بدرجات فقط (طلب فؤاد) — لا رمادي مزرقّ، لا أخضر، لا ذهبي
+    static final int BG = 0xF5080507, PANEL = 0xFF12060A, SIDEBAR = 0xFF0D0407,
+            CARD = 0xFF180A0E, STROKE = 0xFF38101A, TRACK = 0xFF2A0D14,
             RED = 0xFFE8112D, RED2 = 0xFFFF1E3C, TEXT = 0xFFFFFFFF,
-            MUTED = 0xFF9A9AA3, GREEN = 0xFF3BFF7A;
+            MUTED = 0xFFB08D96;
 
     private final Context ctx;
     private final WindowManager wm;
@@ -48,7 +54,13 @@ public class MenuOverlay {
     private FrameLayout root;
     private LinearLayout body;
     private View bubble;
+    private View contentScroll; // صفحة التمرير — لتمييز منطقة المحتوى عند السحب
     private boolean haptic = true, bubbleAdded = false, removing = false;
+    // حالة سحب القائمة كلها (اعتراض اللمس من الجذر) + أعلام استثناء المقبض والسلايدرات
+    private float dragDownX, dragDownY;
+    private int dragStartX, dragStartY;
+    private boolean dragArmed = false, dragMoving = false, dragScrollLock = false, dragOverContent = false;
+    private boolean gripActive = false, sliderActive = false;
 
     public MenuOverlay(Context c) {
         ctx = c; wm = (WindowManager) c.getSystemService(Context.WINDOW_SERVICE);
@@ -106,7 +118,7 @@ public class MenuOverlay {
     /** Panel background like the reference: black fading to deep maroon, thin red stroke. */
     private GradientDrawable panelBg() {
         GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                new int[]{BG, 0xF51C060B});
+                new int[]{BG, 0xF5240810});
         d.setCornerRadius(dp(16));
         d.setStroke(Math.max(1, dp(1)), RED);
         return d;
@@ -166,7 +178,11 @@ public class MenuOverlay {
 
     // ---------- root / header / sidebar / footer ----------
     private void buildRoot() {
-        root = new FrameLayout(ctx);
+        // الجذر يعترض اللمس: سحب القائمة ممكن من أي مكان فيها (انظر onRootIntercept)
+        root = new FrameLayout(ctx) {
+            @Override public boolean onInterceptTouchEvent(MotionEvent e) { return onRootIntercept(e); }
+            @Override public boolean onTouchEvent(MotionEvent e) { return onRootTouch(e); }
+        };
         root.setBackground(panelBg());
 
         LinearLayout panel = new LinearLayout(ctx); panel.setOrientation(LinearLayout.VERTICAL);
@@ -186,7 +202,7 @@ public class MenuOverlay {
         titles.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
         LinearLayout titleRow = new LinearLayout(ctx); titleRow.setOrientation(LinearLayout.HORIZONTAL);
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView crownIc = label("♛", 13, 0xFFFFC93B); // التاج الذهبي مثل صورة التصميم
+        TextView crownIc = label("♛", 13, RED2); // التاج أحمر الآن — ضمن لوحة الأسود/الأحمر فقط
         LinearLayout.LayoutParams crLp = new LinearLayout.LayoutParams(-2, -2);
         crLp.setMargins(0, 0, dp(4), 0); crownIc.setLayoutParams(crLp);
         titleRow.addView(crownIc); titleRow.addView(twoTone("boha", " xvip", 18));
@@ -202,8 +218,8 @@ public class MenuOverlay {
         // Online indicator, right of the title block
         View dot = new View(ctx);
         LinearLayout.LayoutParams dLp = new LinearLayout.LayoutParams(dp(7), dp(7));
-        dLp.setMargins(0, 0, dp(5), 0); dot.setLayoutParams(dLp); dot.setBackground(oval(GREEN));
-        TextView online = label("Online", 10, GREEN);
+        dLp.setMargins(0, 0, dp(5), 0); dot.setLayoutParams(dLp); dot.setBackground(oval(RED2));
+        TextView online = label("Online", 10, RED2);
         LinearLayout onlineRow = new LinearLayout(ctx); onlineRow.setOrientation(LinearLayout.HORIZONTAL);
         onlineRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams oLp = new LinearLayout.LayoutParams(-2, -2); oLp.setMargins(0, 0, dp(10), 0);
@@ -217,7 +233,7 @@ public class MenuOverlay {
         close.setOnClickListener(v -> { click(v); removeCompletely(); }); // X = نزع كامل + إيقاف الخدمة
         header.addView(min); header.addView(close);
         panel.addView(header);
-        makeDraggable(header, false);
+        // لا مقبض سحب خاص بالهيدر بعد الآن — الجذر يسحب القائمة من أي مكان فيها
 
         View sep = new View(ctx);
         sep.setLayoutParams(new LinearLayout.LayoutParams(-1, Math.max(1, dp(0.7f))));
@@ -230,7 +246,7 @@ public class MenuOverlay {
         panel.addView(middle);
 
         LinearLayout sidebar = new LinearLayout(ctx); sidebar.setOrientation(LinearLayout.VERTICAL);
-        sidebar.setBackground(round(0xFF140609, 14, 0xFF2A0D13, 0.7f));
+        sidebar.setBackground(round(SIDEBAR, 14, STROKE, 0.7f));
         sidebar.setPadding(dp(6), dp(8), dp(6), dp(8));
         LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(dp(98), -1);
         sbLp.setMargins(0, 0, dp(10), 0); sidebar.setLayoutParams(sbLp);
@@ -238,6 +254,7 @@ public class MenuOverlay {
 
         body = new LinearLayout(ctx); body.setOrientation(LinearLayout.VERTICAL);
         ScrollView scroll = new ScrollView(ctx); scroll.setVerticalScrollBarEnabled(false);
+        contentScroll = scroll;
         scroll.addView(body);
         scroll.setLayoutParams(new LinearLayout.LayoutParams(0, -1, 1f));
         middle.addView(scroll);
@@ -290,7 +307,7 @@ public class MenuOverlay {
         sep2.setBackgroundColor(STROKE); panel.addView(sep2);
 
         LinearLayout footer = new LinearLayout(ctx); footer.setOrientation(LinearLayout.HORIZONTAL);
-        footer.setGravity(Gravity.CENTER_VERTICAL); footer.setPadding(0, dp(8), dp(2), 0);
+        footer.setGravity(Gravity.CENTER_VERTICAL); footer.setPadding(0, dp(8), dp(30), 0); // حافة يمنى أوسع: زر Reset لا يقع تحت مقبض التحجيم أبداً
         TextView info = label("ⓘ", 14, RED2);
         LinearLayout.LayoutParams inLp = new LinearLayout.LayoutParams(-2, -2);
         inLp.setMargins(0, 0, dp(6), 0); info.setLayoutParams(inLp);
@@ -312,7 +329,8 @@ public class MenuOverlay {
 
         // ----- resize grip, bottom-right corner, overlaid on the panel -----
         TextView grip = label("◢", 15, RED2); grip.setGravity(Gravity.CENTER);
-        FrameLayout.LayoutParams gLp = new FrameLayout.LayoutParams(dp(30), dp(30));
+        grip.setBackground(round(0xFF1A0509, 10, STROKE, 0.7f)); // خلفية خاصة به ليُرى ويُعثر عليه بسهولة
+        FrameLayout.LayoutParams gLp = new FrameLayout.LayoutParams(dp(36), dp(36));
         gLp.gravity = Gravity.BOTTOM | Gravity.END;
         grip.setLayoutParams(gLp);
         root.addView(grip);
@@ -346,7 +364,8 @@ public class MenuOverlay {
         if (!(inner instanceof ImageView)) b.setBackground(oval(0x00000000));
         bubble = b;
         bubble.setVisibility(View.GONE);
-        bubble.setOnClickListener(v -> collapse(false));
+        // لا OnClickListener هنا: مستمع لمس السحب يستهلك ACTION_DOWN فلا يصل النقر
+        // إلى آلية النقر أبداً (كان هذا خلل v6). النقرة تُعالج داخل makeBubbleDraggable.
     }
     private void collapse(boolean hideMenu) {
         if (hideMenu) {
@@ -358,7 +377,7 @@ public class MenuOverlay {
                 bubbleParams.gravity = Gravity.TOP | Gravity.START;
                 bubbleParams.x = prefs.getInt("bubbleX", dp(14)); bubbleParams.y = prefs.getInt("bubbleY", dp(120));
                 wm.addView(bubble, bubbleParams); bubbleAdded = true;
-                makeDraggable(bubble, true);
+                makeBubbleDraggable();
             }
             boolean stealth = prefs.getBoolean("stealth", false);
             bubble.setVisibility(stealth ? View.GONE : View.VISIBLE);
@@ -373,47 +392,99 @@ public class MenuOverlay {
         }
     }
 
-    // ---------- drag: DIRECT touch-drag, NO long-press (v6) ----------
-    // Touch the header (or the bubble) and move: the window follows the finger at
-    // once, 1:1, through the LIVE LayoutParams. A 6dp touch slop separates a drag
-    // from a tap: below the slop nothing moves and the touch is handed back on UP,
-    // so the bubble's OnClickListener and the header buttons keep working exactly
-    // as before. Positions are clamped on-screen (the window can never be dragged
-    // out of reach), the final position is saved, and the bubble then snaps
-    // smoothly to the nearest side edge.
-    private void makeDraggable(final View v, final boolean isBubble) {
-        v.setClickable(true);
-        v.setOnTouchListener(new View.OnTouchListener() {
+    // ---------- drag v7: the WHOLE panel + the bubble ----------
+    // Panel: the root FrameLayout intercepts the gesture (onRootIntercept below).
+    // Children always get the touch first; the root steals it ONLY once the finger
+    // has clearly started moving, so taps, toggles and buttons are untouched.
+    // Direction-aware: a vertical-dominant move that started on the page area is
+    // left to the page ScrollView (dragScrollLock); a SeekBar drag is never stolen
+    // (sliderActive, set by the SeekBar listener); the resize grip keeps its own
+    // gesture (gripActive). Everywhere else — header, sidebar, footer, rows —
+    // any-direction movement drags the whole window 1:1 through the LIVE params.
+    private boolean onRootIntercept(MotionEvent e) {
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                dragDownX = e.getRawX(); dragDownY = e.getRawY();
+                dragMoving = false; dragScrollLock = false;
+                dragArmed = params != null;
+                if (dragArmed) { dragStartX = params.x; dragStartY = params.y; }
+                dragOverContent = isOverContent(e.getRawX(), e.getRawY());
+                return false; // لا تعترض أبداً عند اللمس الأول — الأولوية للأزرار والصفوف
+            case MotionEvent.ACTION_MOVE:
+                if (!dragArmed || dragMoving || dragScrollLock || gripActive || sliderActive) return false;
+                float dx = e.getRawX() - dragDownX, dy = e.getRawY() - dragDownY;
+                if (Math.abs(dx) + Math.abs(dy) <= dp(6)) return false;
+                if (dragOverContent && Math.abs(dy) > Math.abs(dx) * 1.5f) {
+                    dragScrollLock = true; // حركة عمودية على المحتوى = تمرير صفحة، ليست سحب نافذة
+                    return false;
+                }
+                dragMoving = true;
+                return true; // اسرق الإيماءة الآن: الأطفال يستلمون CANCEL والسحب يبدأ
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                dragArmed = false;
+                return false;
+        }
+        return false;
+    }
+    private boolean onRootTouch(MotionEvent e) {
+        if (!dragMoving || params == null) return false;
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_MOVE:
+                params.x = clampDragX(dragStartX + (int) (e.getRawX() - dragDownX), params.width, false);
+                params.y = clampDragY(dragStartY + (int) (e.getRawY() - dragDownY));
+                try { wm.updateViewLayout(root, params); } catch (Exception ignored) {}
+                return true;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                dragMoving = false; dragArmed = false;
+                savePos(false, params);
+                return true;
+        }
+        return false;
+    }
+    private boolean isOverContent(float rawX, float rawY) {
+        if (contentScroll == null) return false;
+        int[] loc = new int[2];
+        contentScroll.getLocationOnScreen(loc);
+        return rawX >= loc[0] && rawX <= loc[0] + contentScroll.getWidth()
+                && rawY >= loc[1] && rawY <= loc[1] + contentScroll.getHeight();
+    }
+
+    // Bubble: its own window, its own listener. A tap (UP with no drag) reopens
+    // the menu RIGHT HERE — v6 relied on an OnClickListener that could never fire
+    // because this listener consumes ACTION_DOWN. No edge snap anymore: the
+    // bubble stays exactly where it is dropped.
+    private void makeBubbleDraggable() {
+        bubble.setClickable(true);
+        bubble.setOnTouchListener(new View.OnTouchListener() {
             int startX, startY; float touchX, touchY;
             boolean dragging = false;
             public boolean onTouch(View view, MotionEvent e) {
-                WindowManager.LayoutParams pr = isBubble ? bubbleParams : params;
-                if (pr == null) return false;
+                if (bubbleParams == null) return false;
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
-                        startX = pr.x; startY = pr.y;
+                        startX = bubbleParams.x; startY = bubbleParams.y;
                         touchX = e.getRawX(); touchY = e.getRawY();
                         dragging = false;
-                        return true; // claim the gesture, otherwise no MOVE ever arrives
+                        return true;
                     case MotionEvent.ACTION_MOVE: {
                         int dx = (int) (e.getRawX() - touchX), dy = (int) (e.getRawY() - touchY);
                         if (!dragging && Math.abs(dx) + Math.abs(dy) > dp(6)) dragging = true;
                         if (dragging) {
-                            pr.x = clampDragX(startX + dx, pr.width, isBubble);
-                            pr.y = clampDragY(startY + dy);
-                            try { wm.updateViewLayout(isBubble ? bubble : root, pr); } catch (Exception ignored) {}
+                            bubbleParams.x = clampDragX(startX + dx, bubbleParams.width, true);
+                            bubbleParams.y = clampDragY(startY + dy);
+                            try { wm.updateViewLayout(bubble, bubbleParams); } catch (Exception ignored) {}
                         }
                         return true;
                     }
                     case MotionEvent.ACTION_UP:
+                        if (dragging) { dragging = false; savePos(true, bubbleParams); }
+                        else { click(view); collapse(false); } // نقرة = إعادة فتح القائمة
+                        return true;
                     case MotionEvent.ACTION_CANCEL:
-                        if (dragging) {
-                            dragging = false;
-                            savePos(isBubble, pr);
-                            if (isBubble) snapBubbleToEdge(); // تنزلق بسلاسة لأقرب حافة
-                            return true; // كان سحباً = استهلك اللمسة
-                        }
-                        return false; // نقرة عادية: خلّها توصل لزر الفقاعة / الأزرار
+                        dragging = false;
+                        return true;
                 }
                 return false;
             }
@@ -430,27 +501,6 @@ public class MenuOverlay {
         try { prefs.edit().putInt(isBubble ? "bubbleX" : "menuX", pr.x)
                 .putInt(isBubble ? "bubbleY" : "menuY", pr.y).apply(); } catch (Exception ignored) {}
     }
-    /** After a drag, glide the bubble to the nearest left/right edge and save it there. */
-    private void snapBubbleToEdge() {
-        if (bubbleParams == null || bubble == null || bubble.getVisibility() != View.VISIBLE) return;
-        int w = bubbleParams.width;
-        int target = (bubbleParams.x + w / 2 < screenW / 2) ? dp(8) : Math.max(dp(8), screenW - w - dp(8));
-        if (target == bubbleParams.x) return;
-        ValueAnimator anim = ValueAnimator.ofInt(bubbleParams.x, target);
-        anim.setDuration(180);
-        anim.setInterpolator(new DecelerateInterpolator());
-        anim.addUpdateListener(a -> {
-            if (bubbleParams == null) return;
-            bubbleParams.x = (int) a.getAnimatedValue();
-            try { wm.updateViewLayout(bubble, bubbleParams); } catch (Exception ignored) {}
-        });
-        anim.addListener(new android.animation.AnimatorListenerAdapter() {
-            @Override public void onAnimationEnd(android.animation.Animator a) {
-                if (bubbleParams != null) savePos(true, bubbleParams);
-            }
-        });
-        anim.start();
-    }
 
     // ---------- resize grip (bottom-right corner, live LayoutParams) ----------
     private void makeResizable(final View grip) {
@@ -460,6 +510,7 @@ public class MenuOverlay {
                 if (params == null) return false;
                 switch (e.getAction()) {
                     case MotionEvent.ACTION_DOWN:
+                        gripActive = true; // أخبر معترض الجذر: هذه الإيماءة للمقبض، لا تسحب النافذة
                         startW = params.width; startH = params.height;
                         touchX = e.getRawX(); touchY = e.getRawY();
                         return true;
@@ -470,6 +521,7 @@ public class MenuOverlay {
                         return true;
                     case MotionEvent.ACTION_UP:
                     case MotionEvent.ACTION_CANCEL:
+                        gripActive = false;
                         prefs.edit().putInt("menuW", params.width).putInt("menuH", params.height).apply();
                         return true;
                 }
@@ -520,7 +572,10 @@ public class MenuOverlay {
         r.setGravity(Gravity.CENTER_VERTICAL); r.setPadding(dp(2), dp(9), dp(2), dp(9));
         if (icon != null && !icon.isEmpty()) {
             TextView ic = label(icon, 16, RED2); ic.setGravity(Gravity.CENTER);
-            ic.setLayoutParams(new LinearLayout.LayoutParams(dp(30), -2));
+            ic.setLayoutParams(new LinearLayout.LayoutParams(dp(30), dp(30)));
+            ic.setBackground(round(0xFF22060C, 9, STROKE, 0.7f)); // رقاقة داكنة حمراء خلف الأيقونة مثل التصميم المرجعي
+            LinearLayout.LayoutParams icLp = (LinearLayout.LayoutParams) ic.getLayoutParams();
+            icLp.setMargins(0, 0, dp(2), 0);
             r.addView(ic);
         }
         LinearLayout texts = new LinearLayout(ctx); texts.setOrientation(LinearLayout.VERTICAL);
@@ -566,7 +621,10 @@ public class MenuOverlay {
         head.setGravity(Gravity.CENTER_VERTICAL);
         if (icon != null && !icon.isEmpty()) {
             TextView ic = label(icon, 16, RED2); ic.setGravity(Gravity.CENTER);
-            ic.setLayoutParams(new LinearLayout.LayoutParams(dp(30), -2));
+            ic.setLayoutParams(new LinearLayout.LayoutParams(dp(30), dp(30)));
+            ic.setBackground(round(0xFF22060C, 9, STROKE, 0.7f));
+            LinearLayout.LayoutParams icLp = (LinearLayout.LayoutParams) ic.getLayoutParams();
+            icLp.setMargins(0, 0, dp(2), 0);
             head.addView(ic);
         }
         LinearLayout texts = new LinearLayout(ctx); texts.setOrientation(LinearLayout.VERTICAL);
@@ -581,7 +639,7 @@ public class MenuOverlay {
         TextView val = label(saved + unit, 12, TEXT); val.setTypeface(Typeface.DEFAULT_BOLD);
         val.setGravity(Gravity.CENTER);
         val.setPadding(dp(10), dp(3), dp(10), dp(3));
-        val.setBackground(round(0xFF0D0D10, 9, STROKE, 0.7f));
+        val.setBackground(round(SIDEBAR, 9, STROKE, 0.7f));
         head.addView(texts); head.addView(val); col.addView(head);
         SeekBar s = new SeekBar(ctx); s.setMax(100);
         styleSeek(s);
@@ -590,7 +648,8 @@ public class MenuOverlay {
             public void onProgressChanged(SeekBar sb, int pr, boolean u) {
                 float v = min + (max - min) * pr / 100f; float r = Math.round(v * 10) / 10f;
                 val.setText(r + unit); prefs.edit().putFloat(key, r).apply(); cb.run(r);
-            } public void onStartTrackingTouch(SeekBar sb) {} public void onStopTrackingTouch(SeekBar sb) {}
+            } public void onStartTrackingTouch(SeekBar sb) { sliderActive = true; }   // لا تسرق سحب السلايدر أبداً
+              public void onStopTrackingTouch(SeekBar sb) { sliderActive = false; }
         }); col.addView(s); addRow(g, col);
     }
     private void slider(LinearLayout p, String key, String name, float min, float max, float def, String unit, FloatCb cb) {
