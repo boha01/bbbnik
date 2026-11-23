@@ -1,12 +1,11 @@
 package com.bonika.modmenu;
 
+import android.animation.ValueAnimator;
 import android.app.Service;
 import android.content.*;
 import android.graphics.*;
 import android.graphics.drawable.*;
 import android.os.Build;
-import android.os.Handler;
-import android.os.Looper;
 import android.text.*;
 import android.text.style.*;
 import android.view.*;
@@ -14,14 +13,23 @@ import android.view.animation.DecelerateInterpolator;
 import android.widget.*;
 
 /**
- * MenuOverlay v4 — boha xvip (long-press drag added)
- * Black / red redesign matching bonika's reference image:
- * near-black panel, left sidebar (Home / Aim / Visual / Misc / Config),
- * red toggles and sliders, his circular logo in the header, status footer.
- * Dragging binds to the LIVE LayoutParams with a touch threshold (v1 bug fix kept),
- * minimize hides smoothly to a floating bubble (nothing is removed),
- * X / "Remove Menu Completely" removes BOTH views and stops FloatingService.
- * Bottom-right grip resizes the panel live (width + height, clamped, saved as menuW/menuH).
+ * MenuOverlay v6 — boha xvip (DIRECT drag, no long-press + closer to the reference design)
+ * Changes from v5, per bonika's request (2026-11-23):
+ *  - Dragging is now DIRECT: touch the header (or the bubble) and move — the window
+ *    follows the finger immediately. The 400ms long-press timer is gone entirely.
+ *    A small 6dp touch slop keeps plain taps working (header buttons are children and
+ *    are hit-tested first; a tap on the bubble still fires its OnClickListener).
+ *  - Drag positions are clamped on-screen, so the menu/bubble can never be lost
+ *    off an edge; on release the bubble smoothly snaps to the nearest side edge.
+ *  - Design moved closer to his reference image: horizontal sidebar rows
+ *    (icon + label, active = red gradient pill), features grouped as rows with
+ *    dividers inside ONE content card per page (like the reference), dark
+ *    Reset button with red border, panel background a black -> deep-maroon
+ *    gradient with a red stroke, gold crown next to the header title.
+ * Everything else is unchanged from v5: same pages and features, same sidebar
+ * (Home / Aim / Visual / Misc / Config), same status footer, minimize hides
+ * smoothly to the floating bubble, X / "Remove Menu Completely" removes BOTH
+ * views and stops FloatingService, bottom-right grip resizes live (menuW/menuH).
  * All NativeBridge calls and prefs keys from v2 are preserved unchanged.
  * Logo: reads drawable "boha_logo" if present, otherwise falls back to a red "B" circle.
  */
@@ -35,6 +43,7 @@ public class MenuOverlay {
     private final WindowManager wm;
     private final SharedPreferences prefs;
     private final float density;
+    private final int screenW, screenH;
     private WindowManager.LayoutParams params, bubbleParams;
     private FrameLayout root;
     private LinearLayout body;
@@ -45,6 +54,8 @@ public class MenuOverlay {
         ctx = c; wm = (WindowManager) c.getSystemService(Context.WINDOW_SERVICE);
         prefs = c.getSharedPreferences("modmenu", Context.MODE_PRIVATE);
         density = c.getResources().getDisplayMetrics().density;
+        screenW = c.getResources().getDisplayMetrics().widthPixels;
+        screenH = c.getResources().getDisplayMetrics().heightPixels;
         haptic = prefs.getBoolean("haptic", true);
         buildRoot();
         buildBubble();
@@ -91,6 +102,14 @@ public class MenuOverlay {
     private void applyOpacity() {
         float o = prefs.getFloat("opacity", 1f);
         if (root != null && root.getVisibility() == View.VISIBLE) root.setAlpha(o);
+    }
+    /** Panel background like the reference: black fading to deep maroon, thin red stroke. */
+    private GradientDrawable panelBg() {
+        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{BG, 0xF51C060B});
+        d.setCornerRadius(dp(16));
+        d.setStroke(Math.max(1, dp(1)), RED);
+        return d;
     }
     private GradientDrawable round(int color, float radiusDp, int strokeColor, float strokeDp) {
         GradientDrawable d = new GradientDrawable();
@@ -148,7 +167,7 @@ public class MenuOverlay {
     // ---------- root / header / sidebar / footer ----------
     private void buildRoot() {
         root = new FrameLayout(ctx);
-        root.setBackground(round(BG, 16, RED, 1f));
+        root.setBackground(panelBg());
 
         LinearLayout panel = new LinearLayout(ctx); panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(12), dp(10), dp(12), dp(10));
@@ -165,7 +184,13 @@ public class MenuOverlay {
 
         LinearLayout titles = new LinearLayout(ctx); titles.setOrientation(LinearLayout.VERTICAL);
         titles.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
-        titles.addView(twoTone("boha", " xvip", 18));
+        LinearLayout titleRow = new LinearLayout(ctx); titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView crownIc = label("♛", 13, 0xFFFFC93B); // التاج الذهبي مثل صورة التصميم
+        LinearLayout.LayoutParams crLp = new LinearLayout.LayoutParams(-2, -2);
+        crLp.setMargins(0, 0, dp(4), 0); crownIc.setLayoutParams(crLp);
+        titleRow.addView(crownIc); titleRow.addView(twoTone("boha", " xvip", 18));
+        titles.addView(titleRow);
         LinearLayout subRow = new LinearLayout(ctx); subRow.setOrientation(LinearLayout.HORIZONTAL);
         subRow.setGravity(Gravity.CENTER_VERTICAL); subRow.setPadding(0, dp(1), 0, 0);
         TextView mod = label("MOD MENU  ", 9, MUTED); mod.setTypeface(Typeface.DEFAULT_BOLD);
@@ -205,9 +230,9 @@ public class MenuOverlay {
         panel.addView(middle);
 
         LinearLayout sidebar = new LinearLayout(ctx); sidebar.setOrientation(LinearLayout.VERTICAL);
-        sidebar.setBackground(round(SIDEBAR, 14, STROKE, 0.7f));
+        sidebar.setBackground(round(0xFF140609, 14, 0xFF2A0D13, 0.7f));
         sidebar.setPadding(dp(6), dp(8), dp(6), dp(8));
-        LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(dp(86), -1);
+        LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(dp(98), -1);
         sbLp.setMargins(0, 0, dp(10), 0); sidebar.setLayoutParams(sbLp);
         middle.addView(sidebar);
 
@@ -225,12 +250,15 @@ public class MenuOverlay {
         TextView[] sideLabels = new TextView[names.length];
         for (int i = 0; i < names.length; i++) {
             final int idx = i;
-            LinearLayout item = new LinearLayout(ctx); item.setOrientation(LinearLayout.VERTICAL);
-            item.setGravity(Gravity.CENTER); item.setPadding(0, dp(9), 0, dp(9));
+            LinearLayout item = new LinearLayout(ctx); item.setOrientation(LinearLayout.HORIZONTAL);
+            item.setGravity(Gravity.CENTER_VERTICAL); item.setPadding(dp(10), dp(9), dp(6), dp(9));
             LinearLayout.LayoutParams iLp = new LinearLayout.LayoutParams(-1, -2);
             iLp.setMargins(0, 0, 0, dp(4)); item.setLayoutParams(iLp);
-            TextView ic = label(icons[i], 17, MUTED); ic.setGravity(Gravity.CENTER);
-            TextView lb = label(names[i], 11, MUTED); lb.setGravity(Gravity.CENTER);
+            TextView ic = label(icons[i], 16, MUTED); ic.setGravity(Gravity.CENTER);
+            ic.setLayoutParams(new LinearLayout.LayoutParams(dp(24), -2));
+            TextView lb = label(names[i], 12, MUTED);
+            LinearLayout.LayoutParams lbLp = new LinearLayout.LayoutParams(-2, -2);
+            lbLp.setMargins(dp(6), 0, 0, 0); lb.setLayoutParams(lbLp);
             item.addView(ic); item.addView(lb);
             item.setOnClickListener(v -> {
                 click(v);
@@ -271,8 +299,8 @@ public class MenuOverlay {
         TextView status = label("Status : " + (hooked ? "Features Loaded" : "Waiting for hook…"), 11, MUTED);
         status.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
         Button reset = new Button(ctx); reset.setText("🗑  Reset"); reset.setAllCaps(false); reset.setTextSize(11);
-        reset.setTextColor(Color.WHITE); reset.setTypeface(Typeface.DEFAULT_BOLD);
-        reset.setBackground(gradient(RED, RED2, 10));
+        reset.setTextColor(RED2); reset.setTypeface(Typeface.DEFAULT_BOLD);
+        reset.setBackground(round(0xFF1A0509, 10, RED, 1f)); // مثل التصميم: غامق بحدود ونص أحمرين
         reset.setPadding(dp(12), 0, dp(12), 0);
         reset.setLayoutParams(new LinearLayout.LayoutParams(-2, dp(30)));
         reset.setOnClickListener(v -> {
@@ -345,61 +373,83 @@ public class MenuOverlay {
         }
     }
 
-    // ---------- drag: LONG-PRESS then move (v4, bonika's request) ----------
-    // A normal tap does nothing to position (buttons / toggles / sliders keep working).
-    // Press and HOLD ~400ms on the header (or on the bubble) -> drag activates with a
-    // small haptic + scale pop, then moving the finger moves the whole window smoothly
-    // by updating the LIVE LayoutParams. Releasing the finger ends the drag.
+    // ---------- drag: DIRECT touch-drag, NO long-press (v6) ----------
+    // Touch the header (or the bubble) and move: the window follows the finger at
+    // once, 1:1, through the LIVE LayoutParams. A 6dp touch slop separates a drag
+    // from a tap: below the slop nothing moves and the touch is handed back on UP,
+    // so the bubble's OnClickListener and the header buttons keep working exactly
+    // as before. Positions are clamped on-screen (the window can never be dragged
+    // out of reach), the final position is saved, and the bubble then snaps
+    // smoothly to the nearest side edge.
     private void makeDraggable(final View v, final boolean isBubble) {
-        final Handler handler = new Handler(Looper.getMainLooper());
+        v.setClickable(true);
         v.setOnTouchListener(new View.OnTouchListener() {
             int startX, startY; float touchX, touchY;
-            boolean longPressed = false, cancelled = false;
-            final Runnable activateDrag = () -> {
-                if (cancelled) return;
-                longPressed = true;
-                if (haptic) v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-                View target = isBubble ? bubble : root;
-                if (target != null) target.animate().scaleX(1.03f).scaleY(1.03f).setDuration(120).start();
-            };
+            boolean dragging = false;
             public boolean onTouch(View view, MotionEvent e) {
                 WindowManager.LayoutParams pr = isBubble ? bubbleParams : params;
                 if (pr == null) return false;
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
-                        startX = pr.x; startY = pr.y; touchX = e.getRawX(); touchY = e.getRawY();
-                        longPressed = false; cancelled = false;
-                        handler.removeCallbacks(activateDrag);
-                        handler.postDelayed(activateDrag, 400); // الضغط المطوّل
-                        return false; // لا تستهلك: نقرة عادية لازم توصل للأزرار
-                    case MotionEvent.ACTION_MOVE:
+                        startX = pr.x; startY = pr.y;
+                        touchX = e.getRawX(); touchY = e.getRawY();
+                        dragging = false;
+                        return true; // claim the gesture, otherwise no MOVE ever arrives
+                    case MotionEvent.ACTION_MOVE: {
                         int dx = (int) (e.getRawX() - touchX), dy = (int) (e.getRawY() - touchY);
-                        if (!longPressed) {
-                            // تحرّك كثير قبل ما يكمل الضغط المطوّل = تمرير عادي، ألغِ التفعيل
-                            if (Math.abs(dx) + Math.abs(dy) > dp(10)) {
-                                cancelled = true; handler.removeCallbacks(activateDrag);
-                            }
-                            return false;
+                        if (!dragging && Math.abs(dx) + Math.abs(dy) > dp(6)) dragging = true;
+                        if (dragging) {
+                            pr.x = clampDragX(startX + dx, pr.width, isBubble);
+                            pr.y = clampDragY(startY + dy);
+                            try { wm.updateViewLayout(isBubble ? bubble : root, pr); } catch (Exception ignored) {}
                         }
-                        pr.x = startX + dx; pr.y = startY + dy;
-                        try { wm.updateViewLayout(isBubble ? bubble : root, pr); } catch (Exception ignored) {}
                         return true;
+                    }
                     case MotionEvent.ACTION_UP:
                     case MotionEvent.ACTION_CANCEL:
-                        handler.removeCallbacks(activateDrag);
-                        if (longPressed) {
-                            View target = isBubble ? bubble : root;
-                            if (target != null) target.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
-                            // احفظ آخر موقع عشان يرجع مثل ما تركته
-                            try { prefs.edit().putInt(isBubble ? "bubbleX" : "menuX", pr.x)
-                                    .putInt(isBubble ? "bubbleY" : "menuY", pr.y).apply(); } catch (Exception ignored) {}
-                            return true; // سحب بالضغط المطوّل = استهلك اللمسة
+                        if (dragging) {
+                            dragging = false;
+                            savePos(isBubble, pr);
+                            if (isBubble) snapBubbleToEdge(); // تنزلق بسلاسة لأقرب حافة
+                            return true; // كان سحباً = استهلك اللمسة
                         }
-                        return false;
+                        return false; // نقرة عادية: خلّها توصل لزر الفقاعة / الأزرار
                 }
                 return false;
             }
         });
+    }
+    private int clampDragX(int x, int w, boolean isBubble) {
+        if (isBubble) return clamp(x, 0, Math.max(0, screenW - w));
+        return clamp(x, -w + dp(60), screenW - dp(60)); // دائماً يبقى جزء كافٍ من القائمة ظاهراً للإمساك بها
+    }
+    private int clampDragY(int y) {
+        return clamp(y, 0, Math.max(0, screenH - dp(40)));
+    }
+    private void savePos(boolean isBubble, WindowManager.LayoutParams pr) {
+        try { prefs.edit().putInt(isBubble ? "bubbleX" : "menuX", pr.x)
+                .putInt(isBubble ? "bubbleY" : "menuY", pr.y).apply(); } catch (Exception ignored) {}
+    }
+    /** After a drag, glide the bubble to the nearest left/right edge and save it there. */
+    private void snapBubbleToEdge() {
+        if (bubbleParams == null || bubble == null || bubble.getVisibility() != View.VISIBLE) return;
+        int w = bubbleParams.width;
+        int target = (bubbleParams.x + w / 2 < screenW / 2) ? dp(8) : Math.max(dp(8), screenW - w - dp(8));
+        if (target == bubbleParams.x) return;
+        ValueAnimator anim = ValueAnimator.ofInt(bubbleParams.x, target);
+        anim.setDuration(180);
+        anim.setInterpolator(new DecelerateInterpolator());
+        anim.addUpdateListener(a -> {
+            if (bubbleParams == null) return;
+            bubbleParams.x = (int) a.getAnimatedValue();
+            try { wm.updateViewLayout(bubble, bubbleParams); } catch (Exception ignored) {}
+        });
+        anim.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(android.animation.Animator a) {
+                if (bubbleParams != null) savePos(true, bubbleParams);
+            }
+        });
+        anim.start();
     }
 
     // ---------- resize grip (bottom-right corner, live LayoutParams) ----------
@@ -440,6 +490,21 @@ public class MenuOverlay {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2); lp.setMargins(0, 0, 0, dp(10));
         c.setLayoutParams(lp); return c;
     }
+    /** One shared card per page holding all its feature rows, like the reference design. */
+    private LinearLayout groupCard(LinearLayout p) {
+        LinearLayout g = card(); p.addView(g); return g;
+    }
+    /** Adds a feature row into the group card, with a thin divider above it (except the first). */
+    private void addRow(LinearLayout group, View row) {
+        if (group.getChildCount() > 0) {
+            View div = new View(ctx);
+            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, Math.max(1, dp(0.7f)));
+            dlp.setMargins(dp(42), 0, dp(2), 0);
+            div.setLayoutParams(dlp); div.setBackgroundColor(STROKE);
+            group.addView(div);
+        }
+        group.addView(row);
+    }
     private void sectionHead(LinearLayout p, String title, String subtitle) {
         TextView t = label(title, 15, TEXT); t.setTypeface(Typeface.DEFAULT_BOLD);
         TextView s = label(subtitle, 10, MUTED); s.setPadding(0, dp(2), 0, dp(10));
@@ -450,10 +515,9 @@ public class MenuOverlay {
     private interface FloatCb { void run(float v); }
 
     /** Feature row like the reference: red icon + bold name + muted description + red toggle. */
-    private void featureToggle(LinearLayout p, String key, String icon, String name, String desc, boolean def, BoolCb cb) {
-        LinearLayout card = card(); p.addView(card);
+    private void featureToggle(LinearLayout g, String key, String icon, String name, String desc, boolean def, BoolCb cb) {
         LinearLayout r = new LinearLayout(ctx); r.setOrientation(LinearLayout.HORIZONTAL);
-        r.setGravity(Gravity.CENTER_VERTICAL); r.setPadding(0, dp(7), 0, dp(7));
+        r.setGravity(Gravity.CENTER_VERTICAL); r.setPadding(dp(2), dp(9), dp(2), dp(9));
         if (icon != null && !icon.isEmpty()) {
             TextView ic = label(icon, 16, RED2); ic.setGravity(Gravity.CENTER);
             ic.setLayoutParams(new LinearLayout.LayoutParams(dp(30), -2));
@@ -475,7 +539,7 @@ public class MenuOverlay {
         thumb.setLayoutParams(thLp);
         thumb.setBackground(oval(Color.WHITE));
         track.addView(thumb);
-        r.addView(texts); r.addView(track); card.addView(r);
+        r.addView(texts); r.addView(track); addRow(g, r);
 
         final boolean[] state = {prefs.getBoolean(key, def)};
         Runnable paint = () -> {
@@ -494,9 +558,10 @@ public class MenuOverlay {
     }
 
     /** Slider row like the reference: name + description, value in a dark pill badge, red slider. */
-    private void featureSlider(LinearLayout p, String key, String icon, String name, String desc,
+    private void featureSlider(LinearLayout g, String key, String icon, String name, String desc,
                                float min, float max, float def, String unit, FloatCb cb) {
-        LinearLayout card = card(); p.addView(card);
+        LinearLayout col = new LinearLayout(ctx); col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(2), dp(9), dp(2), dp(7));
         LinearLayout head = new LinearLayout(ctx); head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
         if (icon != null && !icon.isEmpty()) {
@@ -517,7 +582,7 @@ public class MenuOverlay {
         val.setGravity(Gravity.CENTER);
         val.setPadding(dp(10), dp(3), dp(10), dp(3));
         val.setBackground(round(0xFF0D0D10, 9, STROKE, 0.7f));
-        head.addView(texts); head.addView(val); card.addView(head);
+        head.addView(texts); head.addView(val); col.addView(head);
         SeekBar s = new SeekBar(ctx); s.setMax(100);
         styleSeek(s);
         s.setProgress((int) ((saved - min) / (max - min) * 100)); cb.run(saved);
@@ -526,7 +591,7 @@ public class MenuOverlay {
                 float v = min + (max - min) * pr / 100f; float r = Math.round(v * 10) / 10f;
                 val.setText(r + unit); prefs.edit().putFloat(key, r).apply(); cb.run(r);
             } public void onStartTrackingTouch(SeekBar sb) {} public void onStopTrackingTouch(SeekBar sb) {}
-        }); card.addView(s);
+        }); col.addView(s); addRow(g, col);
     }
     private void slider(LinearLayout p, String key, String name, float min, float max, float def, String unit, FloatCb cb) {
         featureSlider(p, key, null, name, null, min, max, def, unit, cb);
@@ -562,33 +627,36 @@ public class MenuOverlay {
     // ---------- HOME (reference page: Main Features) ----------
     private LinearLayout pageHome() { LinearLayout p = page();
         sectionHead(p, "Main Features", "Enable or disable the features you want");
-        featureToggle(p, "recoil", "⚡", "No Recoil", "Remove recoil from weapons", false, NativeBridge::setNoRecoil);
-        featureToggle(p, "vehSpeedOn", "➤", "Speed Hack", "Increase your speed", false, NativeBridge::setVehicleSpeedEnabled);
-        featureToggle(p, "esp", "◉", "ESP", "Show enemies through walls", false, NativeBridge::setEspEnabled);
-        featureToggle(p, "god", "✚", "God Mode", "No damage taken", false, NativeBridge::setGodMode);
-        featureSlider(p, "vehSpeed", "↕", "Speed Multiplier", "Adjust vehicle speed multiplier", 1, 10, 1, "x", NativeBridge::setVehicleSpeedMultiplier);
+        LinearLayout g = groupCard(p);
+        featureToggle(g, "recoil", "⚡", "No Recoil", "Remove recoil from weapons", false, NativeBridge::setNoRecoil);
+        featureToggle(g, "vehSpeedOn", "➤", "Speed Hack", "Increase your speed", false, NativeBridge::setVehicleSpeedEnabled);
+        featureToggle(g, "esp", "◉", "ESP", "Show enemies through walls", false, NativeBridge::setEspEnabled);
+        featureToggle(g, "god", "✚", "God Mode", "No damage taken", false, NativeBridge::setGodMode);
+        featureSlider(g, "vehSpeed", "↕", "Speed Multiplier", "Adjust vehicle speed multiplier", 1, 10, 1, "x", NativeBridge::setVehicleSpeedMultiplier);
         return p; }
 
     // ---------- AIM (combat features) ----------
     private LinearLayout pageAim() { LinearLayout p = page();
         sectionHead(p, "Aim / Combat", "Combat features");
-        toggle(p, "god", "God Mode (No Damage)", false, NativeBridge::setGodMode);
-        toggle(p, "ammo", "Infinite Ammo", false, NativeBridge::setInfiniteAmmo);
-        toggle(p, "rapid", "Rapid Fire", false, NativeBridge::setRapidFire);
-        toggle(p, "recoil", "No Recoil", false, NativeBridge::setNoRecoil);
+        LinearLayout g = groupCard(p);
+        toggle(g, "god", "God Mode (No Damage)", false, NativeBridge::setGodMode);
+        toggle(g, "ammo", "Infinite Ammo", false, NativeBridge::setInfiniteAmmo);
+        toggle(g, "rapid", "Rapid Fire", false, NativeBridge::setRapidFire);
+        toggle(g, "recoil", "No Recoil", false, NativeBridge::setNoRecoil);
         return p; }
 
     // ---------- VISUAL (player ESP + visuals features) ----------
     private LinearLayout pageVisual() { LinearLayout p = page();
         sectionHead(p, "Visual", "ESP and visual features");
-        toggle(p, "esp", "Player ESP (Box/Name/Health/Dist)", false, NativeBridge::setEspEnabled);
-        slider(p, "espDist", "ESP Distance", 50, 1000, 500, "m", NativeBridge::setEspDistance);
-        toggle(p, "skeleton", "Skeleton ESP (Bones)", false, NativeBridge::setSkeletonEsp);
-        toggle(p, "npcs", "Show NPCs", true, NativeBridge::setShowNpcs);
-        toggle(p, "vehiclesEsp", "Show Vehicles", false, NativeBridge::setShowVehicles);
-        slider(p, "fov", "Camera FOV", 40, 120, 60, "°", NativeBridge::setFov);
-        toggle(p, "night", "Night Vision", false, NativeBridge::setNightVision);
-        toggle(p, "fly", "Free Fly Camera", false, NativeBridge::setFreeFly);
+        LinearLayout g = groupCard(p);
+        toggle(g, "esp", "Player ESP (Box/Name/Health/Dist)", false, NativeBridge::setEspEnabled);
+        slider(g, "espDist", "ESP Distance", 50, 1000, 500, "m", NativeBridge::setEspDistance);
+        toggle(g, "skeleton", "Skeleton ESP (Bones)", false, NativeBridge::setSkeletonEsp);
+        toggle(g, "npcs", "Show NPCs", true, NativeBridge::setShowNpcs);
+        toggle(g, "vehiclesEsp", "Show Vehicles", false, NativeBridge::setShowVehicles);
+        slider(g, "fov", "Camera FOV", 40, 120, 60, "°", NativeBridge::setFov);
+        toggle(g, "night", "Night Vision", false, NativeBridge::setNightVision);
+        toggle(g, "fly", "Free Fly Camera", false, NativeBridge::setFreeFly);
         LinearLayout card = card(); p.addView(card);
         card.addView(label("ESP Box Color", 13, TEXT));
         LinearLayout colors = new LinearLayout(ctx); colors.setOrientation(LinearLayout.HORIZONTAL);
@@ -609,9 +677,10 @@ public class MenuOverlay {
     // ---------- MISC (vehicle features) ----------
     private LinearLayout pageMisc() { LinearLayout p = page();
         sectionHead(p, "Misc", "Vehicle and misc features");
-        toggle(p, "vehSpeedOn", "Speed Hack", false, NativeBridge::setVehicleSpeedEnabled);
-        slider(p, "vehSpeed", "Speed Multiplier", 1, 10, 1, "x", NativeBridge::setVehicleSpeedMultiplier);
-        toggle(p, "brake", "Instant Brake", false, NativeBridge::setInstantBrake);
+        LinearLayout g = groupCard(p);
+        toggle(g, "vehSpeedOn", "Speed Hack", false, NativeBridge::setVehicleSpeedEnabled);
+        slider(g, "vehSpeed", "Speed Multiplier", 1, 10, 1, "x", NativeBridge::setVehicleSpeedMultiplier);
+        toggle(g, "brake", "Instant Brake", false, NativeBridge::setInstantBrake);
         Button b = styledButton("Teleport to Waypoint", true);
         b.setOnClickListener(v -> { click(v); NativeBridge.teleportToWaypoint(); });
         p.addView(b); return p; }
@@ -619,9 +688,10 @@ public class MenuOverlay {
     // ---------- CONFIG (settings + remove) ----------
     private LinearLayout pageConfig() { LinearLayout p = page();
         sectionHead(p, "Config", "Menu settings");
-        slider(p, "opacity", "Menu Opacity", 0.3f, 1f, 1f, "", v -> { if (root != null) root.setAlpha(v); });
-        toggle(p, "haptic", "Haptic Feedback", true, v -> haptic = v);
-        toggle(p, "stealth", "Hide Menu Button (Stealth)", false, v -> {});
+        LinearLayout g = groupCard(p);
+        slider(g, "opacity", "Menu Opacity", 0.3f, 1f, 1f, "", v -> { if (root != null) root.setAlpha(v); });
+        toggle(g, "haptic", "Haptic Feedback", true, v -> haptic = v);
+        toggle(g, "stealth", "Hide Menu Button (Stealth)", false, v -> {});
         Button save = styledButton("Save Settings", true);
         save.setOnClickListener(v -> { click(v); prefs.edit().apply(); Toast.makeText(ctx, "Saved", Toast.LENGTH_SHORT).show(); });
         Button def = styledButton("Load Defaults", false);
