@@ -8,8 +8,7 @@ import android.provider.Settings;
 import android.widget.Toast;
 
 /**
- * 01 - MainActivity (نقطة الدخول عند التشغيل كمطبيق مستقل)
- * عند الحقن داخل لعبة، لا تُستعمل هذه - الـ Loader في injection/ يبدأ الخدمة مباشرة.
+ * MainActivity — نقطة الدخول عند التشغيل كمطبيق مستقل.
  */
 public class MainActivity extends Activity {
     @Override protected void onCreate(Bundle b) {
